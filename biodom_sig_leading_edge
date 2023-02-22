@@ -1,0 +1,53 @@
+   Biodomain                      n_05  n_01 n_001 n_0001 n_00001
+ * <chr>                         <int> <int> <int>  <int>   <int>
+ 1 Apoptosis                       764   741   689    652     419
+ 2 APP Metabolism                  123   119    97     48      47
+ 3 Autophagy                       506   471   467    316     316
+ 4 Cell Cycle                     1524  1033   831    791     781
+ 5 DNA Repair                      299    66    66      0       0
+ 6 Endolysosome                   1116  1062  1003    937     913
+ 7 Epigenetic                      701   387   376      0       0
+ 8 Immune Response                1721  1623  1492   1333    1115
+ 9 Lipid Metabolism               1677  1576  1414   1331    1231
+10 Metal Binding and Homeostasis   768   734   731    725     702
+11 Mitochondrial Metabolism        998   986   932    857     828
+12 Myelination                     189   185   179    123     123
+13 Oxidative Stress                425   409   409    391     384
+14 Proteostasis                   2177  1845  1347    872     705
+15 RNA Spliceosome                 286    49    49      0       0
+16 Structural Stabilization       2010  1893  1660   1559    1508
+17 Synapse                        1726  1665  1550   1416    1393
+18 Tau Homeostasis                  38    38    38     36      36
+19 Vasculature                     793   732   713    690     559
+
+ BioDomains %>% group_by(Biodomain) %>% 
++     summarise(
++         n_05 = unlist(leadingEdge_genes[padj < 0.05 & NES > 1.7]) %>% unique() %>% length(),
++         n_01 = unlist(leadingEdge_genes[padj < 0.01 & NES > 1.7]) %>% unique() %>% length(),
++         n_001 = unlist(leadingEdge_genes[padj < 0.001 & NES > 1.7]) %>% unique() %>% length(),
++         n_0001 = unlist(leadingEdge_genes[padj < 0.0001 & NES > 1.7]) %>% unique() %>% length(),
++         n_00001 = unlist(leadingEdge_genes[padj < 0.00001 & NES > 1.7]) %>% unique() %>% length()
++         
++     )
+# A tibble: 19 x 6
+   Biodomain                      n_05  n_01 n_001 n_0001 n_00001
+ * <chr>                         <int> <int> <int>  <int>   <int>
+ 1 Apoptosis                       382   375   344    278     265
+ 2 APP Metabolism                  123   119    97     48      47
+ 3 Autophagy                        92    92    72     57      57
+ 4 Cell Cycle                      499   499   498    498     497
+ 5 DNA Repair                        0     0     0      0       0
+ 6 Endolysosome                    751   748   735    692     676
+ 7 Epigenetic                       37    26     0      0       0
+ 8 Immune Response                 878   845   746    650     607
+ 9 Lipid Metabolism                873   819   805    692     657
+10 Metal Binding and Homeostasis    92    62    34     26       0
+11 Mitochondrial Metabolism        891   887   833    780     774
+12 Myelination                     185   185   179    123     123
+13 Oxidative Stress                167   153   152    124     114
+14 Proteostasis                    656   594   561    306     275
+15 RNA Spliceosome                  55    49    49      0       0
+16 Structural Stabilization       1299  1285  1263   1177    1121
+17 Synapse                        1509  1494  1435   1404    1393
+18 Tau Homeostasis                  38    38    38     36      36
+19 Vasculature                     267   248   153    153     153

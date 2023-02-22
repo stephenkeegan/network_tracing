@@ -1,0 +1,452 @@
+---
+title: "Tracing New Filtered NWs"
+author: "Greg Cary"
+date: "`r Sys.Date()`"
+output: 
+  html_document: 
+    fig_width: 5
+    fig_height: 4
+  html_notebook:
+    code_folding: hide
+    theme: spacelab
+    css: style.css
+    toc: true
+    toc_float: true
+---
+
+```{r setup}
+# Package names
+packages <- c(
+  # 'paxtoolsr','org.Hs.eg.db','HotNetvieweR','clusterProfiler', 
+  'synapser','igraph','tidygraph','tidyverse'
+  )
+
+# Load packages
+invisible(lapply(packages, library, character.only = TRUE))
+
+source(paste0(here::here(),'/../biodom_tally.R'))
+source(paste0(here::here(),'/../biodom_enr.R'))
+source(paste0(here::here(),'/../biodom_enr_plots.R'))
+
+theme_set(theme_bw())
+```
+
+Grab relevant data from synapse, including:
+1) Target Risk Scores ([syn25575156](https://www.synapse.org/#!Synapse:syn25575156){target="_blank"}) and Omics Scores ([syn22758536](https://www.synapse.org/#!Synapse:syn22758536){target="_blank"})  
+2) Biodomain Definitions ([syn25428992](https://www.synapse.org/#!Synapse:syn25428992){target="_blank"})  
+2) Risk-enriched Biodomain Terms ([syn45824995](https://www.synapse.org/#!Synapse:syn45824995){target="_blank"})
+3) Pathway Commons Full Graph, v12 ([syn51080932](https://www.synapse.org/#!Synapse:syn51080932){target="_blank"})  
+4) Human Protein Atlas tissue immunohistochemistry micro array data ([syn51074598](https://www.synapse.org/#!Synapse:syn51074598){target="_blank"})  
+7) SEA-AD single cell data ([syn51080312](https://www.synapse.org/#!Synapse:syn51080312){target="_blank"})  
+
+
+```{r}
+synLogin()
+
+# target risk scores
+scores <- read_csv(synTableQuery('select * from syn25575156', includeRowIdAndRowVersion = F)$filepath)
+omics <- read_csv(synTableQuery('select * from syn22758536',  includeRowIdAndRowVersion = F)$filepath)
+
+# biological domain annotations
+biodom <- full_join(
+  # biodomains
+  readRDS(synGet('syn25428992')$path),
+  # domain labels
+  read_csv(synGet('syn26856828')$path),
+  by = c('Biodomain'='domain')
+) %>%
+  mutate(Biodomain = case_when(Biodomain == 'none' ~ NA_character_, T ~ Biodomain))
+
+# enriched biodomain terms
+enr.bd <- read_csv(synGet('syn45824995')$path) %>% 
+  mutate(leadingEdge_genes = str_split(leadingEdge_genes, '\\|'))
+
+# pathway commons graph
+pc.net <- igraph::read_graph(synGet('syn51080932')$path, format = 'graphml') 
+
+# Human protein atlas tissue microarray
+tissue.array <- read_csv(synGet('syn51074598')$path)
+
+# SEA-AD snRNAseq data
+seaad <- read_csv(synGet('syn51080312')$path, guess_max = 2e5)
+```
+
+# Pathway Commons Network
+Build NW objects based on filters
+```{r}
+# specify directed edge types
+directed_edge_types = c("catalysis-precedes",
+                        "controls-expression-of",
+                        "controls-phosphorylation-of",
+                        "controls-state-change-of",
+                        "controls-transport-of"
+                        )
+
+# specify brain expressed gene lists
+hpa.brain.tissues <- c(
+ "caudate", "cerebellum", "cerebral cortex", "hippocampus", 
+ "hypothalamus", "pituitary gland", "dorsal raphe", 
+ "choroid plexus", "substantia nigra"
+)
+
+hpa.brain <- tissue.array %>% 
+  filter(
+    Tissue %in% hpa.brain.tissues, 
+    Level %in% c('Low','Medium','High','Ascending','Descending'),
+    Reliability %in% c('Enhanced','Supported','Approved') ) %>% 
+  pull(Gene.name) %>% unique()
+
+tad.deg <- scores %>% 
+  filter(isScored_omics == 'Y', OmicsScore > 0) %>% 
+  pull(GeneName) %>% unique()
+
+seaad.expr <- seaad %>% 
+  filter(mean > 1) %>% 
+  pull(gene) %>% unique()
+
+brain.genes <- union(hpa.brain, tad.deg) %>% union(., seaad.expr)
+```
+
+Test SEA-AD filters for cell type expression annotation
+```{r}
+x = seaad %>%
+  mutate(
+    logExp = log10(mean),
+    broad1 = as.factor(broad) %>% as.numeric()
+    ) %>%
+  filter(
+    logExp > log10(0.33),
+    # group %in% c('normal', 'dementia')
+    group %in% c('Not_AD', 'Low', 'Intermediate', 'High')
+         ) %>%
+  arrange(desc(logExp))
+x.dummy = x %>% mutate(label = NA_character_)
+
+tep.tg = 'GRIN2B'
+
+y = x %>%
+  filter(gene == tep.tg) %>%
+  filter(!duplicated(broad)) %>%
+  mutate(label = cellType)
+
+z = rbind(y, x.dummy) %>%
+  mutate(broad1 = as.factor(broad) %>% as.numeric())
+
+z1 = rbind(y, x.dummy) %>%
+  mutate(broad1 = case_when(group == 'dementia' ~ broad1+.25,
+                            group == 'normal' ~ broad1-.25,
+                            group == 'High' ~ broad1+.25,
+                            group == 'Intermediate' ~ broad1+.125,
+                            group == 'Low' ~ broad1-.125,
+                            group == 'Not_AD' ~ broad1-.25))
+
+ggplot(z, aes(broad1, logExp, fill= broad))+
+  theme(legend.position = 'top')+
+  labs(x = '', y = 'mean counts, log10',
+       title = paste0('SEA-AD cell-type expression: ', tep.tg))+
+  guides(fill = 'none', color = 'legend' )+
+  geom_violin( color = 'grey80', alpha = .25,
+               draw_quantiles = c(.25,.5,.75), scale = 'width', trim = T)+
+  geom_line(data = subset(z1, gene == tep.tg & is.na(label) ),
+            aes(group = cellType), color = 'grey50') +
+  geom_point(data = subset(z1, gene == tep.tg & is.na(label) ),
+             aes(group = cellType, color = group), alpha = .8)+
+  geom_hline(yintercept = 0, lty = 2, color = 'grey20', lwd = .5)+
+  scale_x_continuous(breaks = 1:8,
+                     labels = seaad$broad %>% unique() %>% sort())
+```
+
+Generate cell type specific expression table
+```{r}
+cellTypeExpr <- seaad %>% 
+
+  # filter out low expression
+  filter(mean > 1) %>% 
+  select(gene, broad, cellType, group) %>% 
+  
+  # only keep genes that are detected above threshold in the same cell in multiple groups
+  group_by(cellType) %>% filter(duplicated(gene)) %>% ungroup() %>% 
+  
+  # retain only gene and broad cell type specification
+  select(-cellType, -group) %>% distinct() %>% 
+  
+  # pivot the table so there are 1's and 0's to indicate if a gene is expressed in each cell class
+  mutate(val = 1) %>% 
+  pivot_wider(id_cols = gene, names_from = broad, values_from = val) %>% 
+  mutate(across(.cols = -gene, ~ if_else(is.na(.x), 0, .x))) %>% 
+  rename(Micro = `Micro-PVM`)
+```
+
+Annotate nodes with TREAT-AD scores and annotations
+```{r}
+net = pc.net
+
+# edge directionality
+x = tibble( edge = E(net)$interaction ) %>% 
+  mutate(
+    directed = if_else(edge %in% directed_edge_types, 1, 0)
+  )
+
+igraph::edge_attr(net, "directed") <- x$directed
+
+# Brain expression evidence
+x = tibble( node = V(net) %>% names ) %>% 
+  mutate(
+    hpa = if_else(node %in% hpa.brain, 1, 0)
+    , ampad_deg = if_else(node %in% tad.deg, 1, 0)
+    , seaad = if_else(node %in% seaad.expr, 1, 0)
+    , brain_exp = if_else(node %in% brain.genes, 1, 0)
+  )
+
+for(i in 2:ncol(x)){
+  igraph::vertex_attr(net, names(x)[i], index = igraph::V(net)) <- x %>% pull(i)
+}
+
+# Overall TREAT-AD Target Risk Score (TRS)
+x = tibble( node = V(net) %>% names ) %>% 
+  left_join(
+    ., scores %>% filter(!duplicated(GeneName)) %>% select(node = GeneName, Overall) %>% distinct()
+    , by = 'node'
+    , na_matches = "never")
+if( all( x$node != names(V(net)) ) ){ cat("Network Node IDs and annotation table IDs dont match") }
+
+igraph::vertex_attr(net, "TargetRiskScore", index = igraph::V(net)) <- x$Overall
+
+# Omics Effect Scores (i.e. directionality)
+x = tibble( node = V(net) %>% names ) %>% 
+  left_join(
+    ., omics %>% filter(!duplicated(GName)) %>% select(node = GName, RNA_TE, Pro_TE) %>% distinct()
+    , by = 'node'
+    , na_matches = "never")
+if( all( x$node != names(V(net)) ) ){ cat("Network Node IDs and annotation table IDs dont match") }
+
+igraph::vertex_attr(net, "RNA_EffectScore", index = igraph::V(net)) <- x$RNA_TE 
+igraph::vertex_attr(net, "Pro_EffectScore", index = igraph::V(net)) <- x$Pro_TE 
+
+# Cell Type Expression
+x = tibble( node = V(net) %>% names ) %>% 
+  left_join(
+    ., cellTypeExpr %>% filter(!duplicated(gene)) %>% rename(node = gene) %>% distinct()
+    , by = 'node'
+    , na_matches = "never")
+
+for(i in 2:ncol(x)){
+  igraph::vertex_attr(net, names(x)[i], index = igraph::V(net)) <- x %>% pull(i)
+}
+
+# produce data frame versions of network, node annotations, and edge annotations
+net.tbl <- igraph::as_data_frame(net)
+
+v.attr <- tibble( na = vertex.attributes(net) ) %>%
+  t() %>% as_tibble(rownames = NA, .name_repair = 'unique') %>% unnest(everything()) %>%
+  rename_with(., ~names(vertex.attributes(net)), everything())
+
+e.attr <- tibble( ea = edge.attributes(net) ) %>% 
+  t() %>% as_tibble(rownames = NA, .name_repair = 'unique') %>% unnest(everything()) %>% 
+  rename_with(., ~names(edge.attributes(net)), everything())
+```
+
+Generate filtered networks
+```{r}
+# NW versions
+# 1) full
+nw <- net
+
+# 2) full.directed
+nw.dir <- igraph::subgraph.edges( 
+  net, 
+  igraph::E(net)[ igraph::E(net)$directed == 1 ],
+  delete.vertices = T 
+  ) %>% 
+  as.directed(mode = 'arbitrary')
+
+# 3) filt.edge
+nw.eFilt <- igraph::subgraph.edges( 
+  net, 
+  igraph::E(net)[ igraph::E(net)$n_edge_evidence > 1 ],
+  delete.vertices = T 
+  )
+
+# 4) filt.node
+nw.nFilt <- igraph::delete_vertices(
+  net,
+  igraph::V(net)[ igraph::V(net)$brain_exp == 0 ]
+)
+
+# 5) filt.edge >> node
+nw.enFilt <- igraph::delete_vertices(
+  nw.eFilt,
+  igraph::V(nw.eFilt)[ igraph::V(nw.eFilt)$brain_exp == 0 ]
+)
+
+# 6) filt.node >> edge
+nw.neFilt <- igraph::subgraph.edges(
+  nw.nFilt,
+  igraph::E(nw.nFilt)[ igraph::E(nw.nFilt)$n_edge_evidence > 1 ],
+  delete.vertices = T 
+)
+```
+
+Calculate NW stats
+```{r fig.width=5, fig.height=6}
+nw.stats <- tibble(  
+  network = c('full','directed','edge_filtered','node_filtered','edge+node_filtered','node+edge_filtered'),
+  n_nodes = c( 
+    nw %>% V %>% length,
+    nw.dir %>% V %>% length,
+    nw.eFilt %>% V %>% length,
+    nw.nFilt %>% V %>% length,
+    nw.enFilt %>% V %>% length,
+    nw.neFilt %>% V %>% length    ),
+  n_edges = c(
+    nw %>% E %>% length,
+    nw.dir %>% E %>% length,
+    nw.eFilt %>% E %>% length,
+    nw.nFilt %>% E %>% length,
+    nw.enFilt %>% E %>% length,
+    nw.neFilt %>% E %>% length     ),
+  avg_path_length = c(
+    nw %>% average.path.length,
+    nw.dir %>% average.path.length,
+    nw.eFilt %>% average.path.length,
+    nw.nFilt %>% average.path.length,
+    nw.enFilt %>% average.path.length,
+    nw.neFilt %>% average.path.length     ),
+  assortativity_coef = c(
+    nw %>% assortativity(., types1 = V(.)),
+    nw.dir %>% assortativity(., types1 = V(.)),
+    nw.eFilt %>% assortativity(., types1 = V(.)),
+    nw.nFilt %>% assortativity(., types1 = V(.)),
+    nw.enFilt %>% assortativity(., types1 = V(.)),
+    nw.neFilt %>% assortativity(., types1 = V(.))     ),
+  connected_components = c(
+    nw %>% no.clusters,
+    nw.dir %>% no.clusters,
+    nw.eFilt %>% no.clusters,
+    nw.nFilt %>% no.clusters,
+    nw.enFilt %>% no.clusters,
+    nw.neFilt %>% no.clusters    )
+  )
+
+nw.stats %>% 
+  pivot_longer(cols = -network, names_to = 'properties', values_to = 'val') %>% 
+  mutate(properties = factor(properties, 
+                             levels = c('n_nodes','n_edges', 'avg_path_length','assortativity_coef','connected_components')) 
+         , network = factor(network, levels = c('full','directed','node_filtered','edge_filtered','node+edge_filtered', 'edge+node_filtered'))) %>% 
+  ggplot(aes(network, val)) +
+  geom_bar(stat = 'identity', position = 'dodge')+
+  theme(legend.position = 'top',
+        axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1))+
+  labs(y = '',x = '', subtitle = 'base network properties')+
+  facet_wrap(~properties, scales = 'free_y', ncol = 2)
+```
+
+```{r}
+write.graph(net, 
+            file = paste0(here::here(), '/data/annotated_base_network.graphml'),
+            format = 'graphml')
+
+synLogin()
+foo <- synStore(File(
+  paste0(here::here(), '/data/annotated_base_network.graphml'),
+  parent = 'syn51080283'))
+```
+
+
+# Gene list to trace
+Distribution of term NES values at different significance levels
+```{r}
+enr.bd %>% 
+  summarise(
+    p05 = list(NES[padj < 0.05]),
+    p01 = list(NES[padj < 0.01]),
+    p001 = list(NES[padj < 0.001]),
+    p0001 = list(NES[padj < 0.0001]),
+    p00001 = list(NES[padj < 0.00001])
+  ) %>% 
+  pivot_longer(everything()) %>% 
+  unnest_longer(value) %>% 
+  ggplot(aes(name, value)) + 
+  geom_hline(yintercept = 1.7, lty = 2, lwd = .5) +
+  geom_violin(scale = 'count', draw_quantiles = c( .5, .9), fill = 'grey90', alpha = .5, trim = F) +
+  scale_x_discrete(limits = rev)+
+  labs(x = 'padj threshold', y = 'term NES values', subtitle = 'dashed line: NES = 1.7')
+```
+
+What are the lengths of the input gene lists (i.e. leading edge genes from terms enriched with different thresholds). Below, the NES threshold is >1.7
+```{r}
+enr.bd %>% 
+  group_by(Biodomain) %>% 
+  summarise(
+    p01 = length(unique(unlist(leadingEdge_genes[padj < 0.01]))),
+    p001 = length(unique(unlist(leadingEdge_genes[padj < 0.001]))),
+    p0001 = length(unique(unlist(leadingEdge_genes[padj < 0.0001]))),
+    p00001 = length(unique(unlist(leadingEdge_genes[padj < 0.00001]))),
+    p01_nes = length(unique(unlist(leadingEdge_genes[padj < 0.01 & NES > 1.7]))),
+    p001_nes = length(unique(unlist(leadingEdge_genes[padj < 0.001 & NES > 1.7]))),
+    p0001_nes = length(unique(unlist(leadingEdge_genes[padj < 0.0001 & NES > 1.7]))),
+    p00001_nes = length(unique(unlist(leadingEdge_genes[padj < 0.00001 & NES > 1.7])))
+    ) %>% 
+  DT::datatable(rownames = F, filter = 'top', )
+```
+
+Specify input gene list from leading edge genes from significantly (padj < 0.01 & NES > 1.7) enriched **APP Metabolism** terms
+```{r}
+input.gene.list <- enr.bd %>% 
+  filter(
+    Biodomain == 'APP Metabolism',
+    padj < 0.01,
+    NES > 1.7
+  ) %>% 
+  pull(leadingEdge_genes) %>% 
+  unlist() %>% 
+  unique()
+```
+
+# Path Tracing
+```{r}
+source(paste0(here::here(), '/scripts/igraph_NW_exp_functions.R'))
+
+app.paths = short_paths(
+    tnet = nw,
+    target = 'APP',
+    targets = input.gene.list,
+    sentinals = input.gene.list,
+    cores = 1)
+```
+
+The (modified) tracing function works. Trace networks with/without filters using batch jobs.  
+
+
+The batch jobs are run using the **biodomain_network_tracing_and_kda.R** script. This script takes input parameters including a number (1..19) specifying which biodomain to trace, and flags to force the use of directed edges, filter nodes without evidence of brain expression, and filter edges without at least 2 different PubMed IDs confirming the link.  
+
+
+The Biodomains with traced NW analyzed by wKDA include:  
+1) APP Metabolism  
+2) Tau Homeostasis  
+3) Immune Response  
+4) Mitochondrial Metabolism
+5) Lipid Metabolism  
+
+Explore the effects of NW filters on traces & KDs for these sets  
+
+# Biodom NW analyses
+## APP Metabolism
+## Tau Homeostasis  
+## Immune Response  
+## Mitochondrial Metabolism
+# Lipid Metabolism 
+
+
+
+
+
+
+
+
+
+# Session
+```{r}
+sessionInfo()
+```
+

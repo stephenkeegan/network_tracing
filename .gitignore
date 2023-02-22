@@ -1,0 +1,12 @@
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+.Rprofile
+caryg.RData
+data
+logs
+network_tracing.Rproj
+networktracing.sif
+renv
+results

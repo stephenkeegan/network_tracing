@@ -1,0 +1,589 @@
+---
+title: "Pseudotime Biodomain Networks & KDs"
+author: "Greg Cary"
+date: "`r Sys.Date()`"
+output: 
+  html_document: 
+    fig_width: 10
+    fig_height: 10
+  html_notebook:
+    code_folding: hide
+    theme: spacelab
+    css: style.css
+    toc: true
+    toc_float: true
+---
+
+```{r setup}
+
+library(synapser)
+library(igraph)
+library(tidyverse)
+source('/projects/carter-lab/caryg/biodom_tally.R')
+# source(paste0(here::here(), '/scripts/Mergeomics_Version_1.99.0.R'))
+
+theme_set(theme_bw())
+
+```
+
+Grab relevant data from synapse
+```{r message=FALSE, warning=FALSE}
+
+synLogin()
+
+# target risk scores
+scores <- read_csv(synTableQuery('select * from syn25575156', includeRowIdAndRowVersion = F)$filepath)
+
+# biological domain annotations
+biodom <- full_join(
+  # biodomains
+  readRDS(synGet('syn25428992')$path),
+  # domain labels
+  read_csv(synGet('syn26856828')$path),
+  by = c('Biodomain'='domain')
+) %>%
+  mutate(Biodomain = case_when(Biodomain == 'none' ~ NA_character_, T ~ Biodomain))
+
+# biodomain enrichment results based on risk scores
+bd_enr_res = read_csv(synapser::synGet('syn45824995')$path) %>% 
+  # filter(Biodomain != 'none') %>% 
+  mutate(leadingEdge_genes = str_split(leadingEdge_genes, '\\|'))
+
+# pseudotime biodom enrichments
+prot.f <- synGet('syn47762627') %>% .$path %>% read_tsv()
+prot.m <- synGet('syn47762544') %>% .$path %>% read_tsv()
+r.rna.f <- synGet('syn47728345') %>% .$path %>% read_tsv() 
+r.rna.m <- synGet('syn47728065') %>% .$path %>% read_tsv() 
+# m.rna.f 
+# m.rna.m 
+
+```
+
+# Number of leading edge genes per state vs significance level for each dataset
+
+```{r}
+
+enr <- prot.f %>% 
+  filter(!is.na(Biodomain)) %>% 
+  mutate(leadingEdge = `enr2$leadingEdge`  %>% str_remove_all(.,'^c|[:punct:]') %>% str_split(' ')  )
+
+sig_explore = map_dfr(
+  c(1e-2, 1e-3, 1e-4, 1e-5, 1e-6, 1e-7),
+  ~ enr %>% 
+      filter( padj < .x
+              # , abs(NES) > 2 
+              ) %>% 
+      group_by( state ) %>%  
+      summarise( 
+        n_sig_bd = length(unique(Biodomain)),
+        n_sig_term = length(unique(pathway)),
+        n_leadingEdge_genes = length(unique(unlist(leadingEdge)))) %>% 
+      arrange(state) %>% 
+      mutate( sig_level = .x)
+)
+
+ggplot(sig_explore, aes(n_leadingEdge_genes, as.factor(state) )) +
+  # geom_point() +
+  geom_bar(stat = 'identity') +
+  scale_y_discrete( limits = rev )+
+  facet_wrap(~sig_level) +
+  ggtitle('F proteomics pseudotime'
+          # , subtitle = 'only terms with abs(NES) > 2'
+          )
+
+```
+
+```{r}
+
+enr <- prot.m %>% 
+  filter(!is.na(Biodomain)) %>% 
+  mutate(leadingEdge = `enr2$leadingEdge` %>% str_remove_all(.,'^c|[:punct:]') %>% str_split(' ')  )
+
+sig_explore = map_dfr(
+  c(1e-2, 1e-3, 1e-4, 1e-5, 1e-6, 1e-7),
+  ~ enr %>% 
+      filter( padj < .x ) %>% 
+      group_by( state ) %>% 
+      summarise( 
+        n_sig_bd = length(unique(Biodomain)),
+        n_sig_term = length(unique(pathway)),
+        n_leadingEdge_genes = length(unique(unlist(leadingEdge)))) %>% 
+      arrange(state) %>% 
+      mutate( sig_level = .x)
+)
+
+ggplot(sig_explore, aes(n_leadingEdge_genes, as.factor(state) )) +
+  # geom_point() +
+  geom_bar(stat = 'identity') +
+  scale_y_discrete( limits = rev )+
+  facet_wrap(~sig_level) +
+  ggtitle('M proteomics pseudotime')
+
+```
+
+```{r}
+
+enr <- r.rna.f %>% 
+  filter(!is.na(Biodomain)) %>% 
+  mutate(leadingEdge = `enr2$leadingEdge` %>% str_remove_all(.,'^c|[:punct:]') %>% str_split(' ') )
+
+sig_explore = map_dfr(
+  c(1e-2, 1e-4, 1e-6, 1e-8, 1e-10, 1e-12),
+  ~ enr %>% 
+      filter( padj < .x
+              # , abs(NES) > 2.5
+              ) %>% 
+      group_by( state ) %>% 
+      summarise( 
+        n_sig_bd = length(unique(Biodomain)),
+        n_sig_term = length(unique(pathway)),
+        n_leadingEdge_genes = length(unique(unlist(leadingEdge)))) %>% 
+      arrange(state) %>% 
+      mutate( sig_level = .x)
+)
+
+ggplot(sig_explore, aes(n_leadingEdge_genes, as.factor(state) )) +
+  # geom_point() +
+  geom_bar(stat = 'identity') +
+  scale_y_discrete( limits = rev )+
+  facet_wrap(~sig_level) +
+  ggtitle('F transcriptomics pseudotime (AMP-AD v2.0)'
+          # , subtitle = 'only terms with abs(NES) > 2.5'
+          )
+
+```
+
+```{r}
+
+enr <- r.rna.m %>% 
+  filter(!is.na(Biodomain)) %>% 
+  mutate(leadingEdge = `enr2$leadingEdge` %>% str_remove_all(.,'^c|[:punct:]') %>% str_split(' ')  )
+
+sig_explore = map_dfr(
+  c(1e-2, 1e-4, 1e-6, 1e-8, 1e-10, 1e-12),
+  ~ enr %>% 
+      filter( padj < .x
+              # , abs(NES) > 2.5 
+              ) %>% 
+      group_by( state ) %>% 
+      summarise( 
+        n_sig_bd = length(unique(Biodomain)),
+        n_sig_term = length(unique(pathway)),
+        n_leadingEdge_genes = length(unique(unlist(leadingEdge)))) %>% 
+      arrange(state) %>% 
+      mutate( sig_level = .x)
+)
+
+ggplot(sig_explore, aes(n_leadingEdge_genes, as.factor(state) )) +
+  # geom_point() +
+  geom_bar(stat = 'identity') +
+  scale_y_discrete( limits = rev )+
+  facet_wrap(~sig_level) +
+  ggtitle('M transcriptomics pseudotime (AMP-AD v2.0)'
+          # , subtitle = 'only terms with abs(NES) > 2.5'
+          )
+
+```
+# Enriched biodomains 
+
+```{r fig.height=7, fig.width=10}
+
+sig_level <- 1e-4
+
+enr <- prot.f %>% 
+  filter(!is.na(Biodomain)) %>% 
+  mutate(leadingEdge = `enr2$leadingEdge` %>% str_remove_all(.,'^c|[:punct:]') %>% str_split(' ')  )
+
+# count up the number of significant terms per biodomain
+bdt <- bd.tally(enr$pathway[enr$padj <= sig_level], biodom) %>% 
+  mutate(domain = fct_reorder(domain, n_sig_term, .desc = T)) %>% 
+  arrange(domain)
+
+# add biodomain annotations and plotting colors to enrichment results
+enr <- enr %>% 
+  mutate( Biodomain = fct_relevel(Biodomain, as.character(bdt$domain) )) %>% 
+  mutate( state = fct_reorder( as.factor(state), as.numeric(state), .desc = T ))
+
+# plot! -------------------------------------------------------------------
+enr %>%   
+  ggplot(aes(  NES, factor(state) ))+ 
+  scale_color_identity()+ scale_fill_identity()+
+  scale_size_continuous(
+    limits = -log10(enr$padj) %>% range(),
+    range = c(.7,5))+
+  geom_jitter(
+    data = subset(enr, padj > sig_level),
+    color = 'grey85', alpha = .2, size = .5, show.legend = F
+    )+
+  geom_jitter(
+    data = subset(enr, padj < sig_level ),
+    aes(color = color, size = -log10(padj) ), #
+    alpha = .5, show.legend = T
+    )+
+  geom_violin(
+    data = subset(enr, padj < sig_level & NES < 0),
+    scale='width', aes(fill = color), color = 'grey50',#, color = col
+    alpha = .3, show.legend = F
+    )+
+  geom_violin(
+    data = subset(enr, padj < sig_level & NES > 0),
+    scale='width', aes(fill = color), color = 'grey50',#, color = col
+    alpha = .3, show.legend = F
+    )+
+  geom_hline(yintercept = 0, lty = 3)+
+  facet_wrap(~Biodomain)+
+  labs(y='pseudotime state')+  theme(legend.position = 'right') +
+  ggtitle(label = 'F proteomics pseudotime'
+          # , subtitle = 'state pval < 0.05 / term padj < 0.05'
+          , subtitle = paste0('term padj < ', sig_level)
+          )
+
+```
+
+```{r fig.height=7, fig.width=10}
+
+sig_level <- 1e-4
+
+enr <- prot.m %>% 
+  filter(!is.na(Biodomain)) %>% 
+  mutate(leadingEdge = `enr2$leadingEdge` %>% str_remove_all(.,'^c|[:punct:]') %>% str_split(' ') )
+
+# count up the number of significant terms per biodomain
+bdt <- bd.tally(enr$pathway[enr$padj <= sig_level], biodom) %>% 
+  mutate(domain = fct_reorder(domain, n_sig_term, .desc = T)) %>% 
+  arrange(domain)
+
+# add biodomain annotations and plotting colors to enrichment results
+enr <- enr %>% 
+  mutate( Biodomain = fct_relevel(Biodomain, as.character(bdt$domain) )) %>% 
+  mutate( state = fct_reorder( as.factor(state), as.numeric(state), .desc = T ))
+
+# plot! -------------------------------------------------------------------
+enr %>%   
+  ggplot(aes(  NES, factor(state) ))+ 
+  scale_color_identity()+ scale_fill_identity()+
+  scale_size_continuous(
+    limits = -log10(enr$padj) %>% range(),
+    range = c(.7,5))+
+  geom_jitter(
+    data = subset(enr, padj > sig_level),
+    color = 'grey85', alpha = .2, size = .5, show.legend = F
+    )+
+  geom_jitter(
+    data = subset(enr, padj < sig_level ),
+    aes(color = color, size = -log10(padj) ), #
+    alpha = .5, show.legend = T
+    )+
+  geom_violin(
+    data = subset(enr, padj < sig_level & NES < 0),
+    scale='width', aes(fill = color), color = 'grey50',#, color = col
+    alpha = .3, show.legend = F
+    )+
+  geom_violin(
+    data = subset(enr, padj < sig_level & NES > 0),
+    scale='width', aes(fill = color), color = 'grey50',#, color = col
+    alpha = .3, show.legend = F
+    )+
+  geom_hline(yintercept = 0, lty = 3)+
+  facet_wrap(~Biodomain)+
+  labs(y='pseudotime state')+  theme(legend.position = 'right') +
+  ggtitle(label = 'M proteomics pseudotime'
+          # , subtitle = 'state pval < 0.05 / term padj < 0.05'
+          , subtitle = paste0('term padj < ', sig_level)
+          )
+
+```
+
+```{r fig.height=7, fig.width=10}
+
+sig_level <- 1e-6
+
+enr <- r.rna.f %>% 
+  filter(!is.na(Biodomain)
+         # , abs(NES) > 2.5
+         ) %>% 
+  mutate(leadingEdge = `enr2$leadingEdge` %>% str_remove_all(.,'^c|[:punct:]') %>% str_split(' ') )
+
+# count up the number of significant terms per biodomain
+bdt <- bd.tally(enr$pathway[enr$padj <= sig_level], biodom) %>% 
+  mutate(domain = fct_reorder(domain, n_sig_term, .desc = T)) %>% 
+  arrange(domain)
+
+# add biodomain annotations and plotting colors to enrichment results
+enr <- enr %>% 
+  mutate( Biodomain = fct_relevel(Biodomain, as.character(bdt$domain) )) %>% 
+  mutate( state = fct_reorder( as.factor(state), as.numeric(state), .desc = T ))
+
+# plot! -------------------------------------------------------------------
+enr %>%   
+  ggplot(aes(  NES, factor(state) ))+ 
+  scale_color_identity()+ scale_fill_identity()+
+  scale_size_continuous(
+    limits = -log10(enr$padj) %>% range(),
+    range = c(.7,5))+
+  geom_jitter(
+    data = subset(enr, padj > sig_level),
+    color = 'grey85', alpha = .2, size = .5, show.legend = F
+    )+
+  geom_jitter(
+    data = subset(enr, padj < sig_level ),
+    aes(color = color, size = -log10(padj) ), #
+    alpha = .5, show.legend = T
+    )+
+  geom_violin(
+    data = subset(enr, padj < sig_level & NES < 0),
+    scale='width', aes(fill = color), color = 'grey50',#, color = col
+    alpha = .3, show.legend = F
+    )+
+  geom_violin(
+    data = subset(enr, padj < sig_level & NES > 0),
+    scale='width', aes(fill = color), color = 'grey50',#, color = col
+    alpha = .3, show.legend = F
+    )+
+  geom_hline(yintercept = 0, lty = 3)+
+  facet_wrap(~Biodomain)+
+  labs(y='pseudotime state')+  theme(legend.position = 'right') +
+  ggtitle(label = 'F transcriptomics pseudotime (AMP-AD v2.0)'
+          # , subtitle = 'state pval < 0.05 / term padj < 0.05'
+          , subtitle = paste0('term padj < ', sig_level)
+          )
+
+```
+
+Something is funny about the new ROSMAP M pseudotime trajectories - all term directions seem inverted (e.g. Immune Response down, Synapse up) vs what might be expected and what is observed in other trajectories. Focus on F pseudotime trajectories for the moment.    
+```{r fig.height=7, fig.width=10}
+
+sig_level <- 1e-6
+
+enr <- r.rna.m %>% 
+  filter(!is.na(Biodomain)) %>% 
+  mutate(leadingEdge = `enr2$leadingEdge` %>% str_remove_all(.,'^c|[:punct:]') %>% str_split(' ') )
+
+# count up the number of significant terms per biodomain
+bdt <- bd.tally(enr$pathway[enr$padj <= sig_level], biodom) %>% 
+  mutate(domain = fct_reorder(domain, n_sig_term, .desc = T)) %>% 
+  arrange(domain)
+
+# add biodomain annotations and plotting colors to enrichment results
+enr <- enr %>% 
+  mutate( Biodomain = fct_relevel(Biodomain, as.character(bdt$domain) )) %>% 
+  mutate( state = fct_reorder( as.factor(state), as.numeric(state), .desc = T ))
+
+# plot! -------------------------------------------------------------------
+enr %>%   
+  ggplot(aes(  NES, factor(state) ))+ 
+  scale_color_identity()+ scale_fill_identity()+
+  scale_size_continuous(
+    limits = -log10(enr$padj) %>% range(),
+    range = c(.7,5))+
+  geom_jitter(
+    data = subset(enr, padj > sig_level),
+    color = 'grey85', alpha = .2, size = .5, show.legend = F
+    )+
+  geom_jitter(
+    data = subset(enr, padj < sig_level ),
+    aes(color = color, size = -log10(padj) ), #
+    alpha = .5, show.legend = T
+    )+
+  geom_violin(
+    data = subset(enr, padj < sig_level & NES < 0),
+    scale='width', aes(fill = color), color = 'grey50',#, color = col
+    alpha = .3, show.legend = F
+    )+
+  geom_violin(
+    data = subset(enr, padj < sig_level & NES > 0),
+    scale='width', aes(fill = color), color = 'grey50',#, color = col
+    alpha = .3, show.legend = F
+    )+
+  geom_hline(yintercept = 0, lty = 3)+
+  facet_wrap(~Biodomain)+
+  labs(y='pseudotime state')+  theme(legend.position = 'right') +
+  ggtitle(label = 'M transcriptomics pseudotime (AMP-AD v2.0)' 
+          # , subtitle = 'state pval < 0.05 / term padj < 0.05'
+          , subtitle = paste0('term padj < ', sig_level)
+          )
+
+```
+
+# Dump input gene lists 
+
+```{r}
+
+enr <- prot.f %>% 
+  filter(!is.na(Biodomain), padj < 1e-4) %>% 
+  mutate(leadingEdge = `enr2$leadingEdge` %>% str_remove_all(.,'^c|[:punct:]|\\n') %>% str_split(' ') ) %>% 
+  group_by( state ) %>% 
+  summarise( leadingEdge_genes = leadingEdge %>% unlist() %>% unique() %>% list() ) %>% 
+  unnest(leadingEdge_genes)
+
+for(s in unique(enr$state)){ 
+  enr %>%
+    filter(state == s) %>%
+    select(leadingEdge_genes) %>%
+    write_tsv(
+      .,
+      paste0( here::here(), '/results/input_gene_lists/proteomics_f_pseudotime_state',s,'_leadingEdge.tsv'),
+      col_names = F)
+  }
+
+```
+
+```{r}
+
+enr <- r.rna.f %>% 
+  filter( !is.na(Biodomain), padj < 1e-6 ) %>% 
+  mutate(leadingEdge = `enr2$leadingEdge` %>% str_remove_all(.,'^c|[:punct:]|\\n') %>% str_split(' ') ) %>% 
+  group_by( state ) %>% 
+  summarise( leadingEdge_genes = leadingEdge %>% unlist() %>% unique() %>% list() ) %>% 
+  unnest(leadingEdge_genes)
+
+for(s in unique(enr$state)){ 
+  enr %>%
+    filter(state == s) %>%
+    select(leadingEdge_genes) %>%
+    write_tsv(
+      .,
+      paste0( here::here(), '/results/input_gene_lists/transcriptomics_f_pseudotime_state',s,'_leadingEdge.tsv'),
+      col_names = F)
+  }
+
+```
+
+
+<!-- # TODO: Submit path trace slurm jobs -->
+
+<!-- ```{r} -->
+<!-- f = list.files(paste0(here::here(), '/results/input_gene_lists'), full.names = T) -->
+
+<!-- # cmd = paste0( -->
+<!-- #   'module load singularity; sbatch ', here::here(), '/scripts/batch_trace.sbatch ', f[1] -->
+<!-- #   ) -->
+
+<!-- Sys.setenv(cmd = paste0( -->
+<!--   'sbatch ', here::here(), '/scripts/batch_trace.sbatch ', f[1] -->
+<!--   )) -->
+<!-- ``` -->
+
+<!-- ```{r engine='bash'} -->
+
+<!-- $cmd -->
+
+<!-- ``` -->
+
+# Analyze traced NWs
+```{r}
+
+# load base NW
+load( synapser::synGet('syn22992753')$path )
+baseNW = net_undirected
+rm(net_undirected)
+
+# what were the inputs to the trace
+inputs <- map_dfr( 
+  unique(prot.f$state), 
+  ~prot.f %>% 
+    filter(!is.na(Biodomain), padj < 1e-4, state == .x) %>% 
+    mutate(leadingEdge = `enr2$leadingEdge` %>% str_remove_all(.,'^c|[:punct:]|\\n') %>% str_split(' ') ) %>% 
+    group_by( Biodomain, pathway, color ) %>% 
+    summarise( leadingEdge_genes = leadingEdge %>% unlist() %>% unique() %>% list() ) %>% 
+    unnest(leadingEdge_genes) %>% 
+    mutate(state = .x)
+) %>% ungroup()
+
+
+```
+
+```{r}
+
+nws = tibble( state = unique(inputs$state),
+              n_input = map_dbl(unique(inputs$state), 
+                                ~ inputs %>% filter(state == .x) %>% select( leadingEdge_genes ) %>% distinct() %>% nrow() ),
+              induced_V = map_dbl(unique(inputs$state), 
+                                  ~ induced_subgraph( baseNW, 
+                                                      v = which( (V(baseNW) %>% names()) %in% 
+                                                                   (inputs %>% filter(state == .x) %>% 
+                                                                      pull(leadingEdge_genes)) ) ) %>% 
+                                    V() %>% length() ),
+              induced_E = map_dbl(unique(inputs$state), 
+                                  ~ induced_subgraph( baseNW, 
+                                                      v = which( (V(baseNW) %>% names()) %in% 
+                                                                   (inputs %>% filter(state == .x) %>% 
+                                                                      pull(leadingEdge_genes)) ) ) %>% 
+                                    E() %>% length() )
+              )
+
+
+# list traced NW objects
+nw.files = list.files( paste0(here::here(), '/results/NW/pseudotime/'), full.names = T ) %>% 
+  str_subset(., '_undirected')
+
+# read NW objects into a list
+nw <- map( nw.files, ~ read_graph( .x, format = 'graphml') )
+
+nws$trace_undir_V = map_dbl( 1:length(nw), ~ V(nw[[.x]]) %>% length() )
+nws$trace_undir_E = map_dbl( 1:length(nw), ~ E(nw[[.x]]) %>% length() )
+
+# list traced NW objects
+nw.files = list.files( paste0(here::here(), '/results/NW/pseudotime/'), full.names = T ) %>% 
+  str_subset(., '_directed')
+
+# read NW objects into a list
+nw <- map( nw.files, ~ read_graph( .x, format = 'graphml') )
+
+nws$trace_dir_V = map_dbl( 1:length(nw), ~ V(nw[[.x]]) %>% length() )
+nws$trace_dir_E = map_dbl( 1:length(nw), ~ E(nw[[.x]]) %>% length() )
+
+```
+
+```{r}
+DT::datatable(nws, rownames = F)
+```
+
+As a fraction of the total nodes and edges present in the base network
+```{r}
+nws %>% 
+  mutate( across( .cols = contains('V'), .fns = ~ .x / base_nV ), 
+          across( .cols = contains('E', ignore.case = F), .fns = ~ .x / base_nE ) ) %>% 
+  DT::datatable(., rownames = F) %>% 
+  DT::formatSignif(., columns = names(nws) %>% str_subset(., '_V|_E') )
+```
+
+# Upload to synapse
+```{r}
+synLogin()
+
+nw.files = list.files( paste0(here::here(), '/results/NW/pseudotime'), full.names = T ) 
+id = 'syn50864398'
+
+for( f in nw.files ){
+  n <- str_extract(f, 'state.*graphml')
+  foo <- synStore( File(f, parent = id, name = n) )
+}
+
+```
+
+# Nanostring panel genes NW
+```{r}
+ns = readxl::read_xls('/projects/carter-lab/caryg/datamouse/data/Supplemental_Table_3_Nanostring_Gene_Annotations.xls') %>% 
+  select(gene = `Human Gene Symbol`) %>% distinct() 
+
+nsNW = read.graph('results/NW/nanostring_traced_subgraph.graphml', 
+                  format = 'graphml')
+
+ns_inducedNW = induced_subgraph(
+  baseNW, 
+  vids = which( (V(baseNW) %>% names()) %in% ns$gene ) 
+  )
+write.graph(ns_inducedNW, 'results/NW/nanostring_induced_subgraph.graphml', format = 'graphml')
+
+nw.files = list.files( paste0(here::here(), '/results/NW'), 
+                        pattern = 'nano', full.names = T ) 
+id = 'syn50864711'
+
+for( f in nw.files ){
+  n <- str_extract(f, 'nanostring.*graphml')
+  foo <- synStore( File(f, parent = id, name = n) )
+}
+
+```
+

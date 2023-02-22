@@ -1,0 +1,800 @@
+---
+title: "Network Filtering Analysis"
+author: "Greg Cary"
+date: "`r Sys.Date()`"
+output: 
+  html_document: 
+    fig_width: 5
+    fig_height: 4
+  html_notebook:
+    code_folding: hide
+    theme: spacelab
+    css: style.css
+    toc: true
+    toc_float: true
+---
+
+```{r setup}
+library(synapser)
+# library(paxtoolsr)
+# library(org.Hs.eg.db)
+# library(clusterProfiler)
+# library(HotNetvieweR)
+library(igraph)
+library(tidygraph)
+library(tidyverse)
+
+source(paste0(here::here(),'/../biodom_tally.R'))
+source(paste0(here::here(),'/../biodom_enr.R'))
+source(paste0(here::here(),'/../biodom_enr_plots.R'))
+
+theme_set(theme_bw())
+```
+
+Grab relevant data from synapse, including:  
+1) Target Risk Scores ([syn25575156](https://www.synapse.org/#!Synapse:syn25575156){target="_blank"}) and Omics Scores ([syn22758536](https://www.synapse.org/#!Synapse:syn22758536){target="_blank"})  
+2) Biodomain Definitions ([syn25428992](https://www.synapse.org/#!Synapse:syn25428992){target="_blank"})  
+3) Pathway Commons Full Graph, v12 ([syn51080932](https://www.synapse.org/#!Synapse:syn51080932){target="_blank"})  
+4) Human Protein Atlas tissue immunohistochemistry micro array data ([syn51074598](https://www.synapse.org/#!Synapse:syn51074598){target="_blank"})  
+5) RNA Brain GTEx ([syn51074639](https://www.synapse.org/#!Synapse:syn51074639){target="_blank"})  
+6) AMP-AD cohort pairwise partial correlations ([ROSMAP](https://www.synapse.org/#!Synapse:syn51061790){target="_blank"}, [Mayo](https://www.synapse.org/#!Synapse:syn51061614){target="_blank"}, [MSBB](https://www.synapse.org/#!Synapse:syn51061324){target="_blank"}); these are quite large! (> 6 GB), wait to load until performing this analysis  
+7) SEA-AD single cell data ([syn51080312](https://www.synapse.org/#!Synapse:syn51080312){target="_blank"}); this is a large file (> 2 GB), wait to load until performing this analysis  
+```{r message=FALSE, warning=FALSE}
+synLogin()
+
+# target risk scores
+scores <- read_csv(synTableQuery('select * from syn25575156', includeRowIdAndRowVersion = F)$filepath)
+omics <- read_csv(synTableQuery('select * from syn22758536',  includeRowIdAndRowVersion = F)$filepath)
+
+# biological domain annotations
+biodom <- full_join(
+  # biodomains
+  readRDS(synGet('syn25428992')$path),
+  # domain labels
+  read_csv(synGet('syn26856828')$path),
+  by = c('Biodomain'='domain')
+) %>%
+  mutate(Biodomain = case_when(Biodomain == 'none' ~ NA_character_, T ~ Biodomain))
+
+# pathway commons graph
+net <- igraph::read_graph(synGet('syn51080932')$path, format = 'graphml') 
+
+# Human protein atlas info
+tissue.array <- read_csv(synGet('syn51074598')$path)
+brain.gtex <- read_csv(synGet('syn51074639')$path)
+```
+
+# Pathway Commons Network
+
+Extract the core NW tables
+```{r message=FALSE}
+net.tbl <- igraph::as_data_frame(net)
+
+v.attr <- tibble( na = vertex.attributes(net) ) %>%
+  t() %>% as_tibble(rownames = NA, .name_repair = 'unique') %>% unnest(everything()) %>%
+  rename_with(., ~names(vertex.attributes(net)), everything())
+
+e.attr <- tibble( ea = edge.attributes(net) ) %>% 
+  t() %>% as_tibble(rownames = NA, .name_repair = 'unique') %>% unnest(everything()) %>% 
+  rename_with(., ~names(edge.attributes(net)), everything())
+```
+
+
+Specify the directed-edge types to filter the Pathway Commons graph  
+```{r}
+directed_edge_types = c("catalysis-precedes",
+                        "controls-expression-of",
+                        "controls-phosphorylation-of",
+                        "controls-state-change-of",
+                        "controls-transport-of"
+                        )
+
+# dir.net <- graph_from_data_frame(d = net.tbl %>% filter(interaction %in% directed_edge_types), directed = T)
+```
+
+How many edges from each source?  
+```{r warning=FALSE}
+bind_cols(
+    sources = str_split(net.tbl$sources,',') %>% unlist %>% unique, 
+    n_edge = map_dbl( 
+        str_split(net.tbl$sources,',') %>% unlist %>% unique, 
+        ~ net.tbl %>% filter(grepl(.x, sources)) %>% nrow() ),
+    any_directed = map_lgl(
+        str_split(net.tbl$sources,',') %>% unlist %>% unique, 
+        ~ net.tbl %>% 
+            mutate(directed = if_else(interaction %in% directed_edge_types, 'dir','undir') ) %>% 
+            filter(grepl(.x, sources)) %>% pull(directed) %>% any(. == 'dir')
+    )
+) %>% 
+  mutate(any_directed = if_else(is.na(any_directed), FALSE, TRUE),
+         any_directed = factor(any_directed, levels=c('TRUE','FALSE'))) %>%
+  arrange(desc(n_edge)) %>% mutate(sources = fct_relevel(sources, sources)) %>%
+  ggplot(aes(sources, n_edge)) + geom_bar(stat = 'identity', aes(fill = any_directed)) +
+  # scale_y_log10()+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1)
+        , legend.position = 'top')
+```
+
+Which edge sources are (generally) well supported?  
+```{r warning=FALSE}
+bind_cols(
+    sources = str_split(net.tbl$sources,',') %>% unlist %>% unique, 
+    n_edge = map_dbl( 
+      str_split(net.tbl$sources,',') %>% unlist %>% unique, 
+      ~ net.tbl %>% filter(grepl(.x, sources)) %>% nrow() )
+    , median_evidence_per_edge = map_dbl( 
+      str_split(net.tbl$sources,',') %>% unlist %>% unique, 
+      ~ net.tbl %>% filter(grepl(.x, sources)) %>% pull(n_edge_evidence) %>% median() )
+    , any_directed = map_lgl(
+        str_split(net.tbl$sources,',') %>% unlist %>% unique, 
+        ~ net.tbl %>% 
+            mutate(directed = if_else(interaction %in% directed_edge_types, 'dir','undir') ) %>% 
+            filter(grepl(.x, sources)) %>% pull(directed) %>% any(. == 'dir') )
+) %>% 
+  mutate(any_directed = if_else(is.na(any_directed), FALSE, TRUE),
+         any_directed = factor(any_directed, levels=c('TRUE','FALSE'))) %>%
+  arrange(desc(n_edge)) %>% mutate(sources = fct_relevel(sources, sources)) %>% 
+  ggplot(aes(n_edge, median_evidence_per_edge)) +
+  geom_point( aes(color = any_directed )) + 
+  scale_x_log10()+ 
+  theme(legend.position = 'top')+
+  ggrepel::geom_label_repel(aes(label = sources), size = 3)
+  # theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1)) 
+```
+
+Distribution of evidence support for edges
+```{r}
+net.tbl %>% 
+  mutate(directed = if_else(interaction %in% directed_edge_types, 'dir','undir') ) %>% 
+  ggplot(aes(n_edge_evidence))+
+  stat_ecdf(geom = 'line', aes(color = directed))+
+  # geom_density(aes(fill = directed))+
+  # geom_histogram(aes(fill = directed), position = position_dodge())+
+  # scale_y_log10()+
+  scale_x_log10()+
+  geom_vline(xintercept = 2, lty = 2, lwd = .5)+
+  labs(y = 'fraction of edges')
+```
+
+Distribution of evidence support for edges
+```{r}
+net.tbl %>% 
+  mutate(directed = if_else(interaction %in% directed_edge_types, 'dir','undir') ) %>% 
+  ggplot(aes(n_source))+
+  stat_ecdf(geom = 'line', aes(color = directed))+
+  # geom_density(aes(fill = directed))+
+  # geom_histogram(aes(fill = directed), position = position_dodge())+
+  # scale_y_log10()+
+  scale_x_log10()+
+  geom_vline(xintercept = 2, lty = 2, lwd = .5)+
+  labs(y = 'fraction of edges')
+```
+
+Distribution of evidence support for edges
+```{r}
+net.tbl %>% 
+  # mutate(directed = if_else(interaction %in% directed_edge_types, 'dir','undir') ) %>% 
+  ggplot(aes( n_edge_types, n_edge_evidence ))+
+  geom_point()+
+  geom_smooth(method = 'lm')+
+  scale_y_log10()+
+  # scale_x_log10()+
+  # geom_vline(xintercept = 2, lty = 2, lwd = .5)+
+  labs()
+```
+
+
+# Human Protein Atlas 
+
+Specify brain tissue types
+```{r}
+brain.tissues <- c(
+ "caudate", "cerebellum", "cerebral cortex", "hippocampus", 
+ "hypothalamus", "pituitary gland", "dorsal raphe", 
+ "choroid plexus", "substantia nigra"
+)
+
+brain.genes <- tissue.array %>% filter(
+  Tissue %in% brain.tissues, 
+  Level %in% c('Low','Medium','High','Ascending','Descending'),
+  Reliability %in% c('Enhanced','Supported','Approved')
+) %>% pull(Gene.name) %>% unique()
+
+not.brain <- tissue.array %>% filter(
+  Tissue %in% brain.tissues,
+  Level %in% c('Not detected'),
+  Reliability %in% c('Enhanced','Supported','Approved')
+) %>% pull(Gene.name) %>% unique()
+
+```
+
+
+```{r}
+# also "brain genes":
+# scores %>% filter(isScored_omics == 'Y', OmicsScore > 0) %>% pull(GeneName) %>% unique()
+
+brain.gtex %>% 
+  mutate(hpa = case_when(Gene.name %in% brain.genes ~ 
+                           paste0('brain (n = ', length(intersect(Gene.name, brain.genes)),' genes)'),
+                         Gene.name %in% not.brain ~ 
+                           paste0('not brain (n = ', length(intersect(Gene.name,not.brain)),' genes)'),
+                         T ~ NA_character_)) %>% 
+  filter(!is.na(hpa)) %>% 
+  ggplot(aes( log10(nTPM), fill = hpa))+
+  geom_density(aes(color = hpa), alpha = .1)+
+  # geom_histogram(position = 'dodge')+
+  # scale_y_log10()+
+  scale_fill_discrete('')+scale_color_discrete('')+
+  theme(legend.position = 'top')
+```
+
+```{r}
+# also "brain genes":
+tad.deg <- scores %>% filter(isScored_omics == 'Y', OmicsScore > 0) %>% pull(GeneName) %>% unique()
+
+brain.gtex %>% 
+  mutate(hpa = case_when(Gene.name %in% tad.deg ~ paste0('TAD DEG (n = ', length(intersect(Gene.name,tad.deg)),' genes)'),
+                         T ~ paste0('not TAD DEG (n = ', length(setdiff(Gene.name, tad.deg)),' genes)'),
+                         )) %>% 
+  filter(!is.na(hpa)) %>% 
+  ggplot(aes( log10(nTPM), fill = hpa))+
+  geom_density(aes(color = hpa), alpha = .1)+
+  # geom_histogram(position = 'dodge')+
+  # scale_y_log10()+
+  scale_fill_discrete('')+scale_color_discrete('')+
+  theme(legend.position = 'top')
+```
+
+```{r}
+# also "brain genes":
+tad.deg <- scores %>% filter(isScored_omics == 'Y', OmicsScore > 0) %>% pull(GeneName) %>% unique()
+
+brain.gtex %>% 
+  mutate(
+  hpa = case_when(
+    Gene.name %in% brain.genes ~ 
+      paste0('HPA brain (n = ', length(intersect(Gene.name, brain.genes)),' genes)'),
+    Gene.name %in% tad.deg ~ paste0('TAD DEG (n = ', length(intersect(Gene.name,tad.deg)),' genes)'),
+    Gene.name %in% not.brain ~ paste0('HPA not brain (n = ', length(intersect(Gene.name,not.brain)),' genes)'),
+    T ~ paste0('other (n = ', length(setdiff(Gene.name, union(union(brain.genes, tad.deg), not.brain))) ,' genes)')
+    )) %>% 
+  ggplot(aes( log10(nTPM), fill = hpa))+
+  geom_density(aes(color = hpa), alpha = .1)+
+  # geom_histogram(position = 'dodge')+
+  # scale_y_log10()+
+  scale_fill_discrete('')+scale_color_discrete('')+
+  guides(fill = guide_legend(nrow=2))+
+  theme(legend.position = 'top')
+```
+
+# SEA-AD single cell data
+```{r}
+seaad <- read_csv(synGet('syn51080312')$path, guess_max = 2e5)
+```
+```{r}
+# also "brain genes":
+# scores %>% filter(isScored_omics == 'Y', OmicsScore > 0) %>% pull(GeneName) %>% unique()
+
+seaad %>% 
+  # filter(is.na(group)) %>% 
+  mutate(
+    hpa = case_when(
+      gene %in% brain.genes ~ paste0('HPA brain (n = ', length(intersect(gene, brain.genes)),' genes)'),
+      gene %in% tad.deg ~ paste0('TAD DEG (n = ', length(intersect(gene,tad.deg)),' genes)'),
+      gene %in% not.brain ~ paste0('HPA not brain (n = ', length(intersect(gene,not.brain)),' genes)'),
+      T ~ paste0('other (n = ', length(unique(setdiff(gene, union(union(brain.genes, tad.deg), not.brain)))) ,' genes)')
+      )
+  ) %>% 
+  filter(!is.na(hpa)) %>% 
+  ggplot(aes( log10(mean), fill = hpa))+
+  geom_density(aes(color = hpa), alpha = .1)+
+  # geom_histogram(position = 'dodge')+
+  # scale_y_log10()+
+  scale_fill_discrete('')+scale_color_discrete('')+
+  guides(fill = guide_legend(nrow=2))+
+  theme(legend.position = 'top')
+```
+
+```{r}
+
+seaad$gene %>% unique() %>% length() %>% print()
+
+```
+
+# Pairwise partial correlations
+
+Specify Enesmbl IDs of brain gene lists
+```{r}
+brain.genes.ensg <- 
+  tissue.array %>% filter(
+    Tissue %in% brain.tissues, 
+    Level %in% c('Low','Medium','High','Ascending','Descending'),
+    Reliability %in% c('Enhanced','Supported','Approved')) %>% 
+    pull(Gene) %>% unique()
+
+not.brain.ensg <- tissue.array %>% filter(
+  Tissue %in% brain.tissues,
+  Level %in% c('Not detected'),
+  Reliability %in% c('Enhanced','Supported','Approved')
+) %>% pull(Gene) %>% unique()
+
+tad.deg.ensg <- scores %>% filter(isScored_omics == 'Y', OmicsScore > 0) %>% pull(ENSG) %>% unique()
+```
+
+Load ROSMAP pairwise partial correlations
+```{r}
+rm.pcor <- read_csv(synGet('syn51061790')$path) %>% 
+  rename(gene1 = X1) %>% 
+  pivot_longer(cols = -gene1, names_to = 'gene2', values_to = 'pcor') %>% 
+  filter(pcor < 1) 
+```
+
+Classify pairs based on HPA expression and TREAT-AD DEG status
+```{r}
+rm.pcor <- rm.pcor %>% 
+  mutate(
+    brain = case_when(
+      (gene1 %in% brain.genes.ensg & gene2 %in% brain.genes.ensg) ~ 'yes, both',
+      (gene1 %in% not.brain.ensg & gene2 %in% not.brain.ensg) ~ 'no, both',
+      (gene1 %in% brain.genes.ensg | gene2 %in% brain.genes.ensg) ~ 'yes, one',
+      (gene1 %in% not.brain.ensg | gene2 %in% not.brain.ensg) ~ 'no, one',
+      T ~ 'other'
+    ),
+    tad.deg = case_when(
+      (gene1 %in% tad.deg.ensg & gene2 %in% tad.deg.ensg) ~ 'yes, both',
+      (gene1 %in% tad.deg.ensg | gene2 %in% tad.deg.ensg) ~ 'yes, one',
+      !(gene1 %in% tad.deg.ensg & gene2 %in% tad.deg.ensg) ~ 'no, both',
+      T ~ 'other'
+    )
+  ) 
+```
+
+
+```{r}
+rm.pcor %>% 
+  ggplot( aes(pcor))+
+  scale_y_log10()+
+  # geom_density()
+  geom_histogram(aes(fill = brain), position = 'dodge')
+```
+
+
+```{r}
+rm.pcor %>% 
+  ggplot( aes( abs(pcor), fill = brain) )+
+  scale_y_log10()+
+  # geom_density(aes(color = brain), alpha = 0.1 )
+  geom_histogram(aes(fill = brain), position = 'dodge')
+```
+
+```{r}
+rm.pcor %>% 
+  ggplot( aes( abs(pcor), fill = tad.deg))+
+  scale_y_log10()+
+  # geom_density(aes(color = tad.deg), alpha = 0.1 )
+  geom_histogram(aes(fill = brain), position = 'dodge')
+```
+
+```{r fig.width=8, fig.height=4}
+x = rm.pcor %>% 
+     filter(gene1 %in% setdiff(brain.genes.ensg, not.brain.ensg)) %>% 
+     group_by(gene1) %>% 
+     summarise(
+         mean_bg = max((pcor[gene2 %in% setdiff(brain.genes.ensg, not.brain.ensg)]), na.rm = T),
+         mean_nbg = max((pcor[gene2 %in% setdiff(not.brain.ensg, brain.genes.ensg)]), na.rm = T)
+     ) 
+y = rm.pcor %>% 
+     filter(gene1 %in% setdiff(not.brain.ensg, brain.genes.ensg)) %>% 
+     group_by(gene1) %>% 
+     summarise(
+         mean_bg = max((pcor[gene2 %in% setdiff(brain.genes.ensg, not.brain.ensg)]), na.rm = T),
+         mean_nbg = max((pcor[gene2 %in% setdiff(not.brain.ensg, brain.genes.ensg)]), na.rm = T)
+     )
+
+cowplot::plot_grid( 
+    ggplot(x, aes(mean_bg, mean_nbg)) + 
+        geom_abline(intercept = 0, slope = 1, lty = 2, lwd = .5)+
+        geom_smooth(method = 'lm', lwd = .5, color = 'grey20')+
+        # coord_cartesian(xlim = c(0.05,0.15), ylim = c(0.05,0.15))+
+      geom_point( alpha = .3 )+
+        labs(title = 'brain genes', x = 'max  pcor\nbrain genes', y = 'max  pcor\nnon-brain genes'),
+    ggplot(y, aes(mean_bg, mean_nbg)) + 
+        geom_abline(intercept = 0, slope = 1, lty = 2, lwd = .5)+
+        geom_smooth(method = 'lm', lwd = .5, color = 'grey20')+
+        # coord_cartesian(xlim = c(0.05,0.15), ylim = c(0.05,0.15))+
+      geom_point( alpha = .3 )+
+        labs(title = 'non brain genes', x = 'max  pcor\nbrain genes', y = 'max  pcor\nnon-brain genes')
+)
+```
+
+
+# Summary
+```{r}
+
+# specify gene lists
+hpa.brain <- tissue.array %>% 
+  filter(
+    Tissue %in% brain.tissues, 
+    Level %in% c('Low','Medium','High','Ascending','Descending'),
+    Reliability %in% c('Enhanced','Supported','Approved') ) %>% 
+  pull(Gene.name) %>% unique()
+
+tad.deg <- scores %>% 
+  filter(isScored_omics == 'Y', OmicsScore > 0) %>% 
+  pull(GeneName) %>% unique()
+
+seaad.expr <- seaad %>% 
+  filter(mean > 1) %>% 
+  pull(gene) %>% unique()
+
+brain.genes <- union(hpa.brain, tad.deg) %>% union(., seaad.expr)
+
+# pull NW stats based on filter
+nw.stats <- tibble(  
+  
+  dir = c(
+    'undirected'
+    ,'directed'
+    
+    ,'undirected'
+    ,'directed'
+    
+    ,'undirected'
+    ,'directed'
+    
+    ,'undirected'
+    ,'directed'
+    
+    ,'undirected'
+    ,'directed'
+    
+    ,'undirected'
+    ,'directed'
+    
+    ,'undirected'
+    ,'directed'
+    
+    ), 
+  
+  filt = c(
+    'none'
+    ,'none'
+    
+    ,'edge_evidence > 1'
+    ,'edge_evidence > 1'
+    
+    ,'HPA_brain'
+    ,'HPA_brain'
+    
+    ,'omics_detect'
+    ,'omics_detect'
+    
+    ,'seaAD_detect'
+    ,'seaAD_detect'
+    
+    ,'all_expr'
+    ,'all_expr'
+
+    ,'expr+evidence'
+    ,'expr+evidence'
+
+        
+    ),
+  
+  nV = c( 
+    net.tbl %>% 
+      graph_from_data_frame %>% V %>% length
+    , net.tbl %>% 
+      filter(interaction %in% directed_edge_types) %>% 
+      graph_from_data_frame(directed=T) %>% V %>% length
+
+    , net.tbl %>% 
+      filter(n_edge_evidence > 1) %>% 
+      graph_from_data_frame %>% V %>% length
+    , net.tbl %>% 
+      filter(n_edge_evidence > 1, 
+             interaction %in% directed_edge_types) %>% 
+      graph_from_data_frame(directed=T) %>% V %>% length
+
+    , net.tbl %>% 
+      filter(from %in% hpa.brain & to %in% hpa.brain) %>% 
+      graph_from_data_frame %>% V %>% length
+    , net.tbl %>% 
+      filter(from %in% hpa.brain & to %in% hpa.brain, 
+             interaction %in% directed_edge_types) %>% 
+      graph_from_data_frame(directed=T) %>% V %>% length
+    
+    , net.tbl %>% 
+      filter(from %in% tad.deg & to %in% tad.deg) %>% 
+      graph_from_data_frame %>% V %>% length
+    , net.tbl %>% 
+      filter(from %in% tad.deg & to %in% tad.deg, 
+             interaction %in% directed_edge_types) %>% 
+      graph_from_data_frame(directed=T) %>% V %>% length
+    
+    , net.tbl %>% 
+      filter(from %in% seaad.expr & to %in% seaad.expr) %>% 
+      graph_from_data_frame %>% V %>% length
+    , net.tbl %>% 
+      filter(from %in% seaad.expr & to %in% seaad.expr, 
+             interaction %in% directed_edge_types) %>% 
+      graph_from_data_frame(directed=T) %>% V %>% length
+    
+    , net.tbl %>% 
+      filter(from %in% brain.genes & to %in% brain.genes) %>% 
+      graph_from_data_frame %>% V %>% length
+    , net.tbl %>% 
+      filter(from %in% brain.genes & to %in% brain.genes, 
+             interaction %in% directed_edge_types) %>% 
+      graph_from_data_frame(directed=T) %>% V %>% length
+    
+    , net.tbl %>% 
+      filter(n_edge_evidence > 1,
+             from %in% brain.genes & to %in% brain.genes) %>% 
+      graph_from_data_frame %>% V %>% length
+    , net.tbl %>% 
+      filter(n_edge_evidence > 1,
+             from %in% brain.genes & to %in% brain.genes, 
+             interaction %in% directed_edge_types) %>% 
+      graph_from_data_frame(directed=T) %>% V %>% length
+    
+    ),
+  
+  nE = c( 
+    net.tbl %>% 
+      graph_from_data_frame %>% E %>% length
+    , net.tbl %>% 
+      filter(interaction %in% directed_edge_types) %>% 
+      graph_from_data_frame(directed=T) %>% E %>% length
+    
+    , net.tbl %>% 
+      filter(n_edge_evidence > 1) %>% 
+      graph_from_data_frame %>% E %>% length
+    , net.tbl %>% 
+      filter(n_edge_evidence > 1, 
+             interaction %in% directed_edge_types) %>% 
+      graph_from_data_frame(directed=T) %>% E %>% length
+    
+    , net.tbl %>% 
+      filter(from %in% hpa.brain & to %in% hpa.brain) %>% 
+      graph_from_data_frame %>% E %>% length
+    , net.tbl %>% 
+      filter(from %in% hpa.brain & to %in% hpa.brain, 
+             interaction %in% directed_edge_types) %>% 
+      graph_from_data_frame(directed=T) %>% E %>% length
+    
+    , net.tbl %>% 
+      filter(from %in% tad.deg & to %in% tad.deg) %>% 
+      graph_from_data_frame %>% E %>% length
+    , net.tbl %>% 
+      filter(from %in% tad.deg & to %in% tad.deg, 
+             interaction %in% directed_edge_types) %>% 
+      graph_from_data_frame(directed=T) %>% E %>% length
+    
+    , net.tbl %>% 
+      filter(from %in% seaad.expr & to %in% seaad.expr) %>% 
+      graph_from_data_frame %>% E %>% length
+    , net.tbl %>% 
+      filter(from %in% seaad.expr & to %in% seaad.expr, 
+             interaction %in% directed_edge_types) %>% 
+      graph_from_data_frame(directed=T) %>% E %>% length
+    
+    , net.tbl %>% 
+      filter(from %in% brain.genes & to %in% brain.genes) %>% 
+      graph_from_data_frame %>% E %>% length
+    , net.tbl %>% 
+      filter(from %in% brain.genes & to %in% brain.genes, 
+             interaction %in% directed_edge_types) %>% 
+      graph_from_data_frame(directed=T) %>% E %>% length
+    
+    , net.tbl %>% 
+      filter(n_edge_evidence > 1,
+             from %in% brain.genes & to %in% brain.genes) %>% 
+      graph_from_data_frame %>% E %>% length
+    , net.tbl %>% 
+      filter(n_edge_evidence > 1,
+             from %in% brain.genes & to %in% brain.genes, 
+             interaction %in% directed_edge_types) %>% 
+      graph_from_data_frame(directed=T) %>% E %>% length
+    
+    ),
+  
+  avg_path_length = c(
+    net.tbl %>% 
+      graph_from_data_frame %>% average.path.length()
+    , net.tbl %>% 
+      filter(interaction %in% directed_edge_types) %>% 
+      graph_from_data_frame(directed=T) %>% average.path.length(directed = T)
+    
+    , net.tbl %>% 
+      filter(n_edge_evidence > 1) %>% 
+      graph_from_data_frame %>% average.path.length()
+    , net.tbl %>% 
+      filter(n_edge_evidence > 1, 
+             interaction %in% directed_edge_types) %>% 
+      graph_from_data_frame(directed=T) %>% average.path.length(directed = T)
+    
+    , net.tbl %>% 
+      filter(from %in% hpa.brain & to %in% hpa.brain) %>% 
+      graph_from_data_frame %>% average.path.length()
+    , net.tbl %>% 
+      filter(from %in% hpa.brain & to %in% hpa.brain, 
+             interaction %in% directed_edge_types) %>% 
+      graph_from_data_frame(directed=T) %>% average.path.length(directed = T)
+    
+    , net.tbl %>% 
+      filter(from %in% tad.deg & to %in% tad.deg) %>% 
+      graph_from_data_frame %>% average.path.length()
+    , net.tbl %>% 
+      filter(from %in% tad.deg & to %in% tad.deg, 
+             interaction %in% directed_edge_types) %>% 
+      graph_from_data_frame(directed=T) %>% average.path.length(directed = T)
+    
+    , net.tbl %>% 
+      filter(from %in% seaad.expr & to %in% seaad.expr) %>% 
+      graph_from_data_frame %>% average.path.length()
+    , net.tbl %>% 
+      filter(from %in% seaad.expr & to %in% seaad.expr, 
+             interaction %in% directed_edge_types) %>% 
+      graph_from_data_frame(directed=T) %>% average.path.length(directed = T)
+
+    , net.tbl %>% 
+      filter(from %in% brain.genes & to %in% brain.genes) %>% 
+      graph_from_data_frame %>% average.path.length()
+    , net.tbl %>% 
+      filter(from %in% brain.genes & to %in% brain.genes, 
+             interaction %in% directed_edge_types) %>% 
+      graph_from_data_frame(directed=T) %>% average.path.length(directed = T)
+    
+    , net.tbl %>% 
+      filter(n_edge_evidence > 1,
+             from %in% brain.genes & to %in% brain.genes) %>% 
+      graph_from_data_frame %>% average.path.length()
+    , net.tbl %>% 
+      filter(n_edge_evidence > 1,
+             from %in% brain.genes & to %in% brain.genes, 
+             interaction %in% directed_edge_types) %>% 
+      graph_from_data_frame(directed=T) %>% average.path.length(directed = T)    
+  ),
+  
+  assortativity_coef = c(
+    net.tbl %>% 
+      graph_from_data_frame %>% assortativity(., types1 = V(.))
+    , net.tbl %>% 
+      filter(interaction %in% directed_edge_types) %>% 
+      graph_from_data_frame(directed=T) %>% assortativity(., types1 = V(.))
+    
+    , net.tbl %>% 
+      filter(n_edge_evidence > 1) %>% 
+      graph_from_data_frame %>% assortativity(., types1 = V(.))
+    , net.tbl %>% 
+      filter(n_edge_evidence > 1, 
+             interaction %in% directed_edge_types) %>% 
+      graph_from_data_frame(directed=T) %>% assortativity(., types1 = V(.))
+    
+    , net.tbl %>% 
+      filter(from %in% hpa.brain & to %in% hpa.brain) %>% 
+      graph_from_data_frame %>% assortativity(., types1 = V(.))
+    , net.tbl %>% 
+      filter(from %in% hpa.brain & to %in% hpa.brain, 
+             interaction %in% directed_edge_types) %>% 
+      graph_from_data_frame(directed=T) %>% assortativity(., types1 = V(.))
+    
+    , net.tbl %>% 
+      filter(from %in% tad.deg & to %in% tad.deg) %>% 
+      graph_from_data_frame %>% assortativity(., types1 = V(.))
+    , net.tbl %>% 
+      filter(from %in% tad.deg & to %in% tad.deg, 
+             interaction %in% directed_edge_types) %>% 
+      graph_from_data_frame(directed=T) %>% assortativity(., types1 = V(.))
+    
+    , net.tbl %>% 
+      filter(from %in% seaad.expr & to %in% seaad.expr) %>% 
+      graph_from_data_frame(directed=T) %>% assortativity(., types1 = V(.))
+    , net.tbl %>% 
+      filter(from %in% seaad.expr & to %in% seaad.expr, 
+             interaction %in% directed_edge_types) %>% 
+      graph_from_data_frame(directed=T) %>% assortativity(., types1 = V(.))
+    
+    
+    , net.tbl %>% 
+      filter(from %in% brain.genes & to %in% brain.genes) %>% 
+      graph_from_data_frame %>% assortativity(., types1 = V(.))
+    , net.tbl %>% 
+      filter(from %in% brain.genes & to %in% brain.genes, 
+             interaction %in% directed_edge_types) %>% 
+      graph_from_data_frame %>% assortativity(., types1 = V(.))
+    
+    
+    , net.tbl %>% 
+      filter(n_edge_evidence > 1,
+             from %in% brain.genes & to %in% brain.genes) %>% 
+      graph_from_data_frame %>% assortativity(., types1 = V(.))
+    , net.tbl %>% 
+      filter(n_edge_evidence > 1,
+             from %in% brain.genes & to %in% brain.genes, 
+             interaction %in% directed_edge_types) %>% 
+      graph_from_data_frame %>% assortativity(., types1 = V(.))
+  ),
+  
+  connected_components = c(
+    net.tbl %>% 
+      graph_from_data_frame %>% no.clusters()
+    , net.tbl %>% 
+      filter(interaction %in% directed_edge_types) %>% 
+      graph_from_data_frame(directed=T) %>% no.clusters()
+    
+    , net.tbl %>% 
+      filter(n_edge_evidence > 1) %>% 
+      graph_from_data_frame %>% no.clusters()
+    , net.tbl %>% 
+      filter(n_edge_evidence > 1, 
+             interaction %in% directed_edge_types) %>% 
+      graph_from_data_frame(directed=T) %>% no.clusters()
+    
+    , net.tbl %>% 
+      filter(from %in% hpa.brain & to %in% hpa.brain) %>% 
+      graph_from_data_frame %>% no.clusters()
+    , net.tbl %>% 
+      filter(from %in% hpa.brain & to %in% hpa.brain, 
+             interaction %in% directed_edge_types) %>% 
+      graph_from_data_frame(directed=T) %>% no.clusters()
+    
+    , net.tbl %>% 
+      filter(from %in% tad.deg & to %in% tad.deg) %>% 
+      graph_from_data_frame %>% no.clusters()
+    , net.tbl %>% 
+      filter(from %in% tad.deg & to %in% tad.deg, 
+             interaction %in% directed_edge_types) %>% 
+      graph_from_data_frame(directed=T) %>% no.clusters()
+    
+    , net.tbl %>% 
+      filter(from %in% seaad.expr & to %in% seaad.expr) %>% 
+      graph_from_data_frame %>% no.clusters()
+    , net.tbl %>% 
+      filter(from %in% seaad.expr & to %in% seaad.expr, 
+             interaction %in% directed_edge_types) %>% 
+      graph_from_data_frame(directed=T) %>% no.clusters()
+    
+    , net.tbl %>% 
+      filter(from %in% brain.genes & to %in% brain.genes) %>% 
+      graph_from_data_frame %>% no.clusters()
+    , net.tbl %>% 
+      filter(from %in% brain.genes & to %in% brain.genes, 
+             interaction %in% directed_edge_types) %>% 
+      graph_from_data_frame(directed=T) %>% no.clusters()
+    
+    , net.tbl %>% 
+      filter(n_edge_evidence > 1,
+             from %in% brain.genes & to %in% brain.genes) %>% 
+      graph_from_data_frame %>% no.clusters()
+    , net.tbl %>% 
+      filter(n_edge_evidence > 1,
+             from %in% brain.genes & to %in% brain.genes, 
+             interaction %in% directed_edge_types) %>% 
+      graph_from_data_frame(directed=T) %>% no.clusters()
+  )
+  
+)
+
+```
+
+```{r, fig.width=10, fig.height=8}
+nw.stats %>% 
+  pivot_longer(cols = c(nV,nE,avg_path_length,assortativity_coef,connected_components), names_to = 'prop', values_to = 'val') %>% 
+  mutate(prop = factor(prop, levels = c('nV','nE', 'avg_path_length','assortativity_coef','connected_components'))
+         , dir = factor(dir, levels = c('undirected','directed'))
+         , filt = factor(filt, levels = c('none','edge_evidence > 1','HPA_brain','omics_detect','seaAD_detect', 
+                                          'all_expr','expr+evidence'))
+         ) %>% 
+  ggplot(aes(filt, val, fill = dir)) +
+  geom_bar(stat = 'identity', position = 'dodge')+
+  theme(legend.position = 'top',
+        axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1))+
+  facet_wrap(~prop, scales = 'free_y', ncol = 2)
+```
+# Session
+```{r}
+sessionInfo()
+```
+
