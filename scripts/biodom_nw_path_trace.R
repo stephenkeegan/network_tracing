@@ -1,8 +1,14 @@
 # This Rscript performs two broad functions:
-# 1. self-trace leading edge genes from enriched biodomain terms
-# 2. perform wKDA on resulting NWs
+# 1. self-trace leading edge genes from enriched biodomain term
+
 
 # setup -------------------------------------------------------------------
+
+cat('
+##################################
+##        PATHWAY TRACING       ##
+##################################
+    ')
 
 # Package names
 packages <- c('synapser','igraph','tidyverse')
@@ -15,10 +21,12 @@ suppressPackageStartupMessages(
 # source path tracing functions
 source(paste0(here::here(), '/scripts/igraph_NW_exp_functions.R'))
 
-# source Mergeomics
-source('https://raw.githubusercontent.com/jessicading/mergeomics/master/Mergeomics_Version_1.99.0.R')
+# # source Mergeomics
+# source('https://raw.githubusercontent.com/jessicading/mergeomics/master/Mergeomics_Version_1.99.0.R')
 
 theme_set(theme_bw())
+
+cat('\npackages loaded:\n', packages, '\n')
 
 # read data ---------------------------------------------------------------
 
@@ -62,7 +70,7 @@ net <- igraph::read_graph(synGet('syn51110930')$path, format = 'graphml')
 # parse args and establish settings
 args <- commandArgs(trailingOnly = TRUE)
 
-cat('\narguments:\n',args, sep='\n')
+cat('\narguments:\n',args, '\n')
 
 bd.idx <- args[ which( grepl('[0-9]{1,2}', args) ) ] %>% as.numeric()
 directed <- any( grepl('dir', args) )
@@ -76,7 +84,12 @@ cat('\n\nBiodomain NW to trace: #', bd.idx, ', ', dom, '\n')
 cat('Trace directed edges?: ', directed, '\n')
 cat('Filter nodes for brain expression?: ', filt_nodes, '\n')
 cat('Filter edges for PMID evidence?: ', filt_edges, '\n')
-cat('Skip pathway tracing and only run wKDA?: ', noTrace, '\n\n')
+# cat('Skip pathway tracing and only run wKDA?: ', noTrace, '\n\n')
+
+net_filename = dom %>% str_replace_all(.,' ','_')
+if( !(dir.exists( paste0(here::here(), '/results/',net_filename) )) ){
+  dir.create( paste0(here::here(), '/results/',net_filename) )
+}
 
 # filter base network -----------------------------------------------------
 
@@ -114,8 +127,8 @@ if( filt_edges & filt_nodes ){
 
 if( directed ){
   nw <- igraph::subgraph.edges( 
-    net, 
-    igraph::E(net)[ igraph::E(net)$directed == 1 ],
+    nw, 
+    igraph::E(nw)[ igraph::E(nw)$directed == 1 ],
     delete.vertices = T 
   ) %>% 
     as.directed(mode = 'arbitrary')
@@ -160,55 +173,33 @@ cat('Number of leading edge genes to trace: ',
 
 # path tracing ------------------------------------------------------------
 
-net_filename = dom %>% str_replace_all(.,' ','_')
-if( !(dir.exists( paste0(here::here(), '/results/',net_filename) )) ){
-  dir.create( paste0(here::here(), '/results/',net_filename) )
-}
+cat('\n','Beginning trace... \n')
+Sys.time()
 
-if( noTrace ){
-  
-  trace.nw <- read.graph(
-    paste0( here::here(), '/results/',net_filename,'/',
-            net_filename, filt, directionality,'.graphml'),
-    format = 'graphml'
-  )
-  trace <- list(names(V(trace.nw)))
-  
-} else {
-  
-  cat('\n','Beginning trace... \n')
-  Sys.time()
+# trace paths in parallel
+future::plan(strategy = 'multisession', workers = 10)
+trace <- furrr::future_map(
+  input.gene.list,
+  ~ short_paths(
+    tnet = nw,
+    target = .x,
+    targets = input.gene.list,
+    sentinals = input.gene.list,
+    cores = 1)
+)
+future::plan(strategy = 'sequential')
 
-  # trace paths in parallel
-  future::plan(strategy = 'multisession', workers = 10)
-  # tictoc::tic()
-  # system.time({
-    trace <- furrr::future_map(
-      input.gene.list,
-      ~ short_paths(
-        tnet = nw,
-        target = .x,
-        targets = input.gene.list,
-        sentinals = input.gene.list,
-        cores = 1)
-    )
-    # tictoc::toc()
-  # })
-  future::plan(strategy = 'sequential')
+# Filter NW obj for traced nodes
+trace_filt <- unlist(trace) %>% unique()
 
-  # Filter NW obj for traced nodes
-  trace_filt <- unlist(trace) %>% unique()
-
-  trace.nw <- igraph::induced_subgraph(
-    nw,
-    v=igraph::V(nw)[ names(igraph::V(nw)) %in% trace_filt ]
-  )
-  
-}
+trace.nw <- igraph::induced_subgraph(
+  nw,
+  v=igraph::V(nw)[ names(igraph::V(nw)) %in% trace_filt ]
+)
 
 # Filter NW obj for traced nodes **annotated to biodomain**
 bd.genes <- biodom %>% filter(Biodomain == dom) %>% 
-  pull(hgnc_symbol) %>% unlist() %>% unique() %>% .[!is.na(.)]
+  pull(symbol) %>% unlist() %>% unique() %>% .[!is.na(.)]
 
 trace_bd_filt <- unlist(trace) %>% intersect(bd.genes,.)
 
@@ -221,37 +212,18 @@ trace.nw.bdFilt <- igraph::induced_subgraph(
 igraph::write_graph(
   trace.nw,
   paste0( here::here(), '/results/',net_filename,'/',
-          net_filename, filt, directionality,'.graphml'),
+          net_filename, directionality, filt,'.graphml'),
   format = "graphml"
 )
 
 igraph::write_graph(
   trace.nw.bdFilt,
   paste0( here::here(), '/results/',net_filename,'/',
-          'bdFiltered_', net_filename, filt , directionality,'.graphml'),
+          'bdFiltered_', net_filename, directionality, filt , '.graphml'),
   format = "graphml"
 )
 
-cat('\n','Trace complete and networks saved. \n')
-Sys.time()
-
-# wKDA --------------------------------------------------------------------
-
-cat('\n\nStarting wKDA...\n')
-Sys.time()
-
-if( !exists('trace.nw.bdFilt') ){
-  trace.nw.bdFilt <- read.graph(
-    paste0( here::here(), '/results/',net_filename,'/',
-            'bdFiltered_', net_filename, filt , directionality,'.graphml' ),
-    format = 'graphml'
-  )
-}
-
-if( !(dir.exists( paste0(here::here(), '/results/',net_filename,'/kda') )) ){
-  dir.create( paste0(here::here(), '/results/',net_filename,'/kda') )
-}
-
+##
 # Remove redundant edges
 nw.simple <- igraph::simplify(
   trace.nw.bdFilt,
@@ -274,84 +246,7 @@ nw.simple <- igraph::simplify(
   )
 )
 
-##
-# Add TREAT-AD scores to edge attributes
-kda.nw <- tibble( ea = edge.attributes(nw.simple) ) %>% 
-  t() %>% as_tibble(rownames = NA, .name_repair = 'unique') %>% 
-  unnest(everything()) %>% 
-  rename_with(., ~names(edge.attributes(nw.simple)), everything()) %>% 
-  select(edge, interaction, occurrance, directed, n_edge, 
-         n_edge_evidence, n_source, n_edge_types) %>% 
-  mutate(HEAD = str_split_fixed(edge, ':',2)[,1], 
-         TAIL = str_split_fixed(edge, ':',2)[,2]) %>% 
-  relocate(HEAD, TAIL) %>% select(-edge) %>% 
-  left_join(., 
-            scores %>% 
-              select(HEAD = GeneName, h.c = Overall, h.g = GeneticsScore, 
-                     h.o = OmicsScore, h.n = NeuropathScore),
-            by = 'HEAD') %>% 
-  left_join(., 
-            scores %>% 
-              select(TAIL = GeneName, t.c = Overall, t.g = GeneticsScore, 
-                     t.o = OmicsScore, t.n = NeuropathScore),
-            by = 'TAIL')
-
-##
-# Module file
-biodom %>% 
-  filter(!is.na(n_hgncSymbol)
-         # , Biodomain == dom
-  ) %>% 
-  select(MODULE = GOterm_Name, NODE = hgnc_symbol) %>% 
-  unnest_longer(NODE) %>% 
-  write_tsv(paste0(here::here(), '/results/', net_filename, '/kda/',
-                   'module_file.tsv'))
-
-##
-# generate network file
-kda.nw %>% 
-  mutate(
-    across(.cols = c(starts_with('h.'), starts_with('t.')), 
-           ~ if_else(is.na(.x), 0, .x)),
-    WEIGHT = h.c+t.c
-  ) %>%
-  select(HEAD, TAIL, WEIGHT) %>% 
-  distinct() %>% 
-  write_tsv(paste0(here::here(), '/results/', net_filename, '/kda/',
-                   net_filename, filt , directionality,'network_file.tsv'))
-
-edgybois <- c(0,1)
-
-for(ef in edgybois){
-  
-  ### Setup KDA job
-  job.kda <- list()
-  # job.kda$label<-paste0(weight_type,'_',ef)  #filename
-  job.kda$label<- paste0(filt, directionality,'_addWeights_edgeFactor_',ef)  #filename
-  job.kda$folder<- paste0(here::here(), '/results/', net_filename,'/')  #path  , '_depth2'
-  job.kda$netfile <- paste0(here::here(), '/results/', net_filename, '/kda/', 
-                            net_filename, filt , directionality,'network_file.tsv')
-  job.kda$modfile <- paste0(here::here(), '/results/', net_filename, '/kda/',
-                            'module_file.tsv')
-  job.kda$edgefactor<- ef  #edgybois
-  job.kda$depth<- 1
-  if(directed) {job.kda$direction <- 1} else {job.kda$direction <- 0}
-  job.kda$nperm <- 100000  #100000  
-  moddata <- tool.read(job.kda$modfile)
-  ## save this to a temporary file and set its path as new job.kda$modfile:
-  tool.save(moddata, "subsetof.supersets.txt")
-  job.kda$modfile <- "subsetof.supersets.txt"
-  
-  ## Running KDA
-  job.kda <- kda.configure(job.kda)
-  job.kda <- kda.start(job.kda)
-  job.kda <- kda.prepare(job.kda)
-  job.kda <- kda.analyze(job.kda)
-  job.kda <- kda.finish(job.kda)
-  
-}
-
-cat('\n\nwKDA complete. \n')
+cat('\n','Trace complete and networks saved. \n')
 Sys.time()
 
 # generate plots ----------------------------------------------------------
@@ -400,7 +295,7 @@ nw.stats <- tibble(
 
 write_csv(nw.stats,
           paste0( here::here(), '/results/',net_filename,'/',
-                  net_filename, filt, directionality, '_netStats.csv' )
+                  net_filename, directionality, filt, '_netStats.csv' )
           )
 
 nw.stats %>% 
@@ -425,43 +320,33 @@ nw.stats %>%
 
 ggsave(
   paste0( here::here(), '/results/',net_filename,'/',
-          net_filename, filt, directionality, '_netStats.pdf' )
+          net_filename, directionality, filt, '_netStats.pdf' )
 )
 
-# wKDA results
-kda.res  <- bind_rows(
-  read_tsv(paste0(here::here(),'/results/', net_filename,
-                  '/kda/',filt, directionality,'_addWeights_edgeFactor_0.results.txt')) %>% 
-    mutate(ef = 'ef0_fdr'),
-  read_tsv(paste0(here::here(),'/results/', net_filename,
-                  '/kda/',filt, directionality,'_addWeights_edgeFactor_1.results.txt')) %>% 
-    mutate(ef = 'ef1_fdr') 
-  ) %>%
-  mutate(FDR = -log10(FDR)) %>%
-  pivot_wider(id_cols = c(MODULE, NODE), names_from = ef, values_from = FDR) %>%
-  mutate(delta_fdr = ef1_fdr - ef0_fdr) %>% arrange(desc(delta_fdr))
-
-write_csv(kda.res,
-          paste0(here::here(),'/results/', net_filename,'/kda/',
-                 filt, directionality,'_delta_edgeFactor.txt')
-          )
-
-kda.res %>% 
-  inner_join(., biodom %>% select(GOterm_Name, Biodomain, abbr, label, color, n_hgncSymbol),
-             by = c('MODULE'='GOterm_Name')) %>%
-  filter( ef1_fdr > -log10(0.1) ) %>%
-  ggplot(aes( ef1_fdr, delta_fdr ))+
-  labs(x = 'wKDA FDR ef1, -log10', y = 'delta FDR, ef1 - ef0')+
-  # geom_abline(intercept = 0, slope =1, lty= 2, lwd = .5)+
-  geom_smooth(method = 'glm', lty = 2, lwd = .5, color = 'grey20')+
-  geom_vline(xintercept = 0, lwd = .5)+ geom_hline(yintercept = 0, lwd = .5) +
-  geom_point(aes(color = color, text = paste0(NODE, '\n', MODULE, '\n', Biodomain)))+
-  ggrepel::geom_label_repel(aes(label = paste0(NODE, '\n', MODULE, '\n', Biodomain)),
-                            size = 2, alpha = .7, min.segment.length = 0)+
-  scale_color_identity(guide = 'none')
-
-ggsave(
-  paste0( here::here(), '/results/',net_filename,'/kda/',filt, directionality,'_deltaEF.pdf' )
-)
+# # synapse upload ----------------------------------------------------------
+# 
+# parent_id <- 'syn51117833'
+# 
+# d <- list.dirs('results', recursive = F) %>% 
+#   str_subset('input_gene_lists|wKDA', negate=T)
+# 
+# for(j in 4:5){
+#   foo <- synStore( Folder(d[j] %>% str_remove_all('results/'), parent = parent_id) )
+#   f <- list.files(d[j]) %>% str_subset('kda',negate=T)
+#   for(i in 1:length(f)){
+#     foo2 <- synStore( File(
+#       paste0(d[j],'/',f[i]),
+#       parent=foo$properties$id
+#     ))
+#   }
+#   foo3 <- synStore( Folder('kda', parent = foo$properties$id) )
+#   f <- list.files( paste0(d[j],'/','kda')) 
+#   for(i in 1:length(f)){
+#     foo4 <- synStore( File(
+#       paste0(d[j],'/kda/',f[i]),
+#       parent=foo3$properties$id
+#     ))
+#   }
+# }
 
 # EOF ##

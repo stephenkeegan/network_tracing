@@ -1,36 +1,32 @@
 #!/usr/bin/env bash
 ### SLURM HEADER
-#SBATCH --output=/projects/carter-lab/caryg/network_tracing/logs/batchtrace-%j.log  #!!
+#SBATCH --output=/projects/carter-lab/caryg/network_tracing/logs/master_batchtrace-%j.log  #!!
 #SBATCH --mail-type=FAIL
 #SBATCH --mail-user=greg.cary@jax.org #!!
 #SBATCH --qos=batch
-#SBATCH --time=48:00:00
-#SBATCH --nodes=1
-#SBATCH --ntasks=1
-#SBATCH --cpus-per-task=32
-#SBATCH --mem=64GB
 #SBATCH --export=ALL
 ### SLURM HEADER
 
-localcores=${SLURM_CPUS_PER_TASK}
-
-#simg_path="/home/caryg/rstudio_etc_4.0.3.sif"
-#simg_path="/projects/carter-lab/caryg/network_tracing/networktracing.sif"
-simg_path="/projects/carter-lab/caryg/sif/rstudio_etc_4.2.1.sif"
 working="/projects/carter-lab/caryg/network_tracing"
 
 cd $working
-module load singularity
 
-#for i in {1..19}; do sbatch scripts/batch_trace.sbatch $i ; done
-# singularity exec $simg_path Rscript $working/scripts/networktracing/code/05_Tracing_Pipeline.R $1
+## exampl slurm batch job call:
+#for i in {1..19}; do sbatch scripts/batch_trace.sbatch $i dir node edge; done
 
-#singularity exec $simg_path Rscript $working/scripts/pathway_commons_tracing.R directed $1
-#singularity exec $simg_path Rscript $working/scripts/pathway_commons_tracing.R undirected $1
+# trace_jobid=`sbatch --job-name=pathtrace -o ./logs/trace-%j.log --time=72:00:00 --cpus-per-task=12 --mem=16GB ./scripts/pathtrace.sbatch $1 $2 $3 $4 | grep -o "[0-9]*"`
+# echo trace_jobid
+# 
+# kda_jobid_ef1=`sbatch --job-name=kda -o ./logs/kda-%j.log --dependency=afterok:$trace_jobid --time=72:00:00 --cpus-per-task=12 --mem=16GB ./scripts/kda.sbatch $1 $2 $3 $4 ef1`
+# echo kda_jobid_ef1
+# 
+# kda_jobid_ef2=`sbatch --job-name=kda -o ./logs/kda-%j.log --dependency=afterok:$trace_jobid --time=72:00:00 --cpus-per-task=12 --mem=16GB ./scripts/kda.sbatch $1 $2 $3 $4 ef0`
+# echo kda_jobid_ef2
 
-singularity exec $simg_path Rscript $working/scripts/biodomain_network_tracing_and_kda.R $1 $2 $3 $4
-#singularity exec $simg_path Rscript $working/scripts/biodomain_network_tracing_and_kda.R $1 dir
-#singularity exec $simg_path Rscript $working/scripts/biodomain_network_tracing_and_kda.R $1 node
-#singularity exec $simg_path Rscript $working/scripts/biodomain_network_tracing_and_kda.R $1 edge
+kda_jobid_ef1=`sbatch --job-name=kda -o ./logs/kda-%j.log --time=72:00:00 --cpus-per-task=12 --mem=16GB ./scripts/kda.sbatch $1 $2 $3 $4 ef1`
+echo kda_jobid_ef1
+
+kda_jobid_ef0=`sbatch --job-name=kda -o ./logs/kda-%j.log --time=72:00:00 --cpus-per-task=12 --mem=16GB ./scripts/kda.sbatch $1 $2 $3 $4 ef0`
+echo kda_jobid_ef0
 
 exit

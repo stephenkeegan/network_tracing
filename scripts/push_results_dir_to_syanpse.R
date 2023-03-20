@@ -5,11 +5,11 @@ synLogin()
 
 parent_id <- 'syn51117833'
 
-d <- list.dirs('results', recursive = F) %>% 
+d <- list.dirs(paste0(here::here(),'/results'), recursive = F) %>% 
   str_subset('input_gene_lists|wKDA', negate=T)
 
-for(j in 4:5){
-  foo <- synStore( Folder(d[j] %>% str_remove_all('results/'), parent = parent_id) )
+for( j in 1:length(d) ){
+  foo <- synStore( Folder(d[j] %>% str_remove_all('^.*results/'), parent = parent_id) )
   f <- list.files(d[j]) %>% str_subset('kda',negate=T)
   for(i in 1:length(f)){
     foo2 <- synStore( File(

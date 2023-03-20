@@ -1,0 +1,797 @@
+---
+title: "Tracing New Filtered NWs"
+author: "Greg Cary"
+date: "`r Sys.Date()`"
+output: 
+  html_document: 
+    fig_width: 5
+    fig_height: 4
+  html_notebook:
+    code_folding: hide
+    theme: spacelab
+    css: style.css
+    toc: true
+    toc_float: true
+---
+
+```{r setup}
+# Package names
+packages <- c(
+  # 'paxtoolsr','org.Hs.eg.db','HotNetvieweR','clusterProfiler', 
+  'synapser','igraph','tidygraph','ggraph','tidyverse'
+  )
+
+# Load packages
+invisible(lapply(packages, library, character.only = TRUE))
+
+source(paste0(here::here(),'/../biodom_tally.R'))
+source(paste0(here::here(),'/../biodom_enr.R'))
+source(paste0(here::here(),'/../biodom_enr_plots.R'))
+
+theme_set(theme_bw())
+```
+
+# Data
+Grab relevant data from synapse, including:
+1) Target Risk Scores ([syn25575156](https://www.synapse.org/#!Synapse:syn25575156){target="_blank"}) and Omics Scores ([syn22758536](https://www.synapse.org/#!Synapse:syn22758536){target="_blank"})  
+2) Biodomain Definitions ([syn25428992](https://www.synapse.org/#!Synapse:syn25428992){target="_blank"})  
+2) Risk-enriched Biodomain Terms ([syn45824995](https://www.synapse.org/#!Synapse:syn45824995){target="_blank"})
+3) Base Network ([syn51110930](https://www.synapse.org/#!Synapse:syn51110930){target="_blank"})  
+4) Synapse IDs of path-traced NW objects  
+5) Synapse IDs of wKDA results 
+6) CRISPRbrain simple phenotype screen data  
+
+```{r}
+synLogin()
+
+# target risk scores
+scores <- read_csv(
+  synTableQuery('select * from syn25575156', includeRowIdAndRowVersion = F)$filepath
+  , col_types = cols())
+omics <- read_csv(
+  synTableQuery('select * from syn22758536', includeRowIdAndRowVersion = F)$filepath
+  , col_types = cols())
+
+# biological domain annotations
+biodom <- full_join(
+  # biodomains
+  readRDS(synGet('syn25428992')$path),
+  # domain labels
+  read_csv(synGet('syn26856828')$path, col_types = cols()),
+  by = c('Biodomain'='domain')
+) %>%
+  mutate(Biodomain = case_when(Biodomain == 'none' ~ NA_character_, T ~ Biodomain))
+
+# enriched biodomain terms
+enr.bd <- read_csv( synGet('syn45824995')$path, col_types = cols() ) %>% 
+  mutate(leadingEdge_genes = str_split(leadingEdge_genes, '\\|'))
+
+# base network
+base_net <- igraph::read_graph(synGet('syn51110930')$path, format = 'graphml') 
+
+# specify directed edge types
+directed_edge_types = c("catalysis-precedes",
+                        "controls-expression-of",
+                        "controls-phosphorylation-of",
+                        "controls-state-change-of",
+                        "controls-transport-of"
+                        )
+
+# read NW results dir on Synapse
+nw.dirs <- map_dfr(
+  synGetChildren('syn51117833')$asList() %>% 
+    tibble(f = .) %>% unnest_wider(f) %>% 
+    filter(name!='nanostring_induced_subgraph.graphml') %>% 
+    pull(id),
+  ~{ synGetChildren(  parent = .x  )$asList() %>% 
+      tibble(f = .) %>% unnest_wider(f) %>% 
+      filter(grepl('graphml', name)) %>% 
+      mutate(
+        bd = str_extract(name, '^(?<=[bdFiltered_]{0,1}).+(?=_[un]*directed)') %>% 
+          str_remove_all('bdFiltered_') %>% str_replace_all('_',' '),
+        bd.filt = if_else(grepl('bdFiltered',name),T,F),
+        filt = str_extract(name, '(?<=_filt_).+(?=\\.graphml)'),
+        dir = str_extract(name, '[un]*directed') 
+        ) %>% 
+      relocate(bd, bd.filt, filt, dir)
+    }
+)
+
+# read KDA results dir on Synapse
+kda.dirs <- map_dfr(
+  synGetChildren('syn51117833')$asList() %>% 
+    tibble(f = .) %>% unnest_wider(f) %>% 
+    filter(name!='nanostring_induced_subgraph.graphml') %>% 
+    pull(id),
+  ~{ id = synGetChildren( parent = .x )$asList() %>% 
+      tibble(f = .) %>% unnest_wider(f) %>% 
+      filter(grepl('kda', name)) %>% pull(id)
+  
+     bd = synGet(.x)$properties$name
+
+     synGetChildren(id)$asList() %>% 
+       tibble(f = .) %>% unnest_wider(f) %>% 
+       filter(grepl('results',name)) %>% 
+       mutate(
+          bd = bd %>% str_replace_all('_' ,' '),
+          filt = str_extract(name, '(?<=_filt_).+(?=_addWeights)'),
+          dir = str_extract(name, '[un]*directed'), 
+          ef = str_extract(name, '(?<=_edgeFactor_)[0|1]')
+          ) %>% 
+        relocate(bd, filt, dir, ef)
+    }
+)
+
+```
+
+CRISPRbrain phenotype data
+```{r}
+synLogin()
+
+# CRISPRbrain data
+syn.dir <- synGetChildren('syn51183357')$asList() %>% 
+  tibble(f = .) %>% 
+  unnest_wider(f)
+
+# Simple Screens
+simple <- map_dfr(
+  syn.dir %>% with(which( !grepl('RNA|CROP',name) )),
+  ~ { 
+    id = syn.dir$id[.x]
+    n = syn.dir$name[.x]
+    synGet(id)$path %>% 
+      read_csv( col_types = cols() ) %>% 
+      mutate(cell = n %>% str_split_fixed(.,'-(?!M)', 2) %>% .[,1],
+             mode = n %>% str_extract('CRISPR[ain]'),
+             expt = n %>% str_remove_all('-CRISPR[ain].csv') %>% 
+               str_split_fixed('-(?!M)',2) %>% .[,2] ) %>% 
+      relocate(cell, mode, expt)
+  }
+  ) %>% 
+  rename(pval = `P Value`, pheno = `Phenotype`, gene_score = `Gene Score`)
+
+simple <- tibble(expt = simple$expt %>% unique() %>% sort(),
+                 phenotype = c('Expansion (CD34 Staining)',
+                                'Reactive Oxygen Species (CellRox Intensity)',
+                                'Proliferation (CFSE Staining)',
+                                'Survival (14 day)', 'Survival (21 day)', 'Survival (28 day)',
+                                'Labile Iron (FeRhoNox Intensity)',
+                                'Immune Activation (CD38 levels)',
+                                'Lysosome Exocytosis (cell surface LAMP1), +IL1a +TNF +C1q',
+                                'Lysosome Exocytosis (cell surface LAMP1), Vehicle',
+                                'Peroxidized Lipids (Liperfluo intensity)',
+                                'Lysosome (LysoTracker intensity)',
+                                'Lysosome Mass or pH (LysoTracker staining), +IL1a +TNF +C1q',
+                                'Lysosome Mass or pH (LysoTracker staining), Vehicle',
+                                'Survival, no antioxidants',
+                                'Phagocytosis (pHRodo-rat synaptosomes)',
+                                'Phagocytosis (pHRodo-labeled synaptosomes), +IL1a +TNF +C1q',
+                                'Phagocytosis (pHRodo-labeled synaptosomes), Vehicle',
+                                'Survival, PSAP KO & no antioxidants',
+                                'Survival, PSAP KO',
+                                'Survival',
+                                'Survival-Proliferation',
+                                'Inflammatory activation (cell-surface VCAM1 levels), +IL1a +TNF +C1q')
+                 ) %>% left_join(simple, . , by = 'expt')
+
+# filter(cell %in% c('iAstrocyte','Glutamatergic Neuron','iTF-Microglia','iPSC')) # don't consider HSPC or T-cell
+```
+
+
+functions to read KDA results and plot sub-networks from identified key drivers
+```{r}
+read_kda_res <- function(ef0_synID, ef1_synID){
+  bind_rows(
+    read_tsv(synGet(ef0_synID)$path, col_types = cols()) %>% mutate(ef = 'ef0_fdr'),
+    read_tsv(synGet(ef1_synID)$path, col_types = cols()) %>% mutate(ef = 'ef1_fdr')
+  ) %>%
+  mutate(FDR = -log10(FDR)) %>%
+  pivot_wider(id_cols = c(MODULE, NODE, MEMBER), names_from = ef, values_from = FDR) %>%
+  mutate(across(contains('_fdr'), ~ if_else(is.na(.x), 0, .x))) %>% 
+  mutate(delta_fdr = ef1_fdr - ef0_fdr) %>% arrange(desc(delta_fdr))
+}
+plot_kd_subnet <- function(nw, kd, term) {
+  
+  vert_num <- match(kd, V(nw)$name)
+  
+  vert_neigh <- neighbors(nw, vert_num)
+  
+  term_num <- biodom %>%
+    filter(GOterm_Name == term) %>%
+    pull(symbol) %>% unlist() %>%
+    match(., V(nw)$name) %>% .[!is.na(.)]
+  
+  g2 <- induced_subgraph(nw, c(vert_num, intersect(term_num, vert_neigh)))
+  g3 <- induced_subgraph(nw, c(vert_num, term_num))
+  
+  cowplot::plot_grid(
+    
+    ggraph(g3, layout = 'linear', circular = TRUE) +
+      geom_edge_arc(alpha = .3, color = 'grey75') +
+      geom_node_point( shape = 21, color = "black", alpha = .3,
+        aes(size = TargetRiskScore, fill = Pro_EffectScore, filter= .N()$name != kd)  )+
+      geom_node_point( shape = 23, color = "black", alpha = .3,
+        aes(size = TargetRiskScore, fill = Pro_EffectScore, filter = .N()$name == kd) )+
+      geom_node_text(aes(label = name), size = 2) +
+      coord_fixed() +
+      scale_size_continuous( range = c(.5, 10), limits = c(0, 5), trans = 'exp')+
+      scale_fill_gradient2(
+        low = 'purple', mid = 'black', high = 'green', na.value = 'grey85',
+        limits = c(-2.5,2.5) )+ #approx: range(omics$Pro_TE, na.rm = T)
+      labs( title = 'All term genes in NW',
+            subtitle = paste0('KD: ', kd, '\nTerm: ', term) )+
+      theme_graph(background = 'white')
+    ,
+    ggraph(g2, layout = 'linear', circular = TRUE) +
+            geom_edge_arc(alpha = .3, color = 'grey75') +
+      geom_node_point( shape = 21, color = "black", alpha = .3,
+        aes(size = TargetRiskScore, fill = Pro_EffectScore, filter= .N()$name != kd)  )+
+      geom_node_point( shape = 23, color = "black", alpha = .3,
+        aes(size = TargetRiskScore, fill = Pro_EffectScore, filter = .N()$name == kd) )+
+      geom_node_text(aes(label = name), size = 2) +
+      coord_fixed() +
+      scale_size_continuous( range = c(.5, 10), limits = c(0, 5), trans = 'exp')+
+      scale_fill_gradient2(
+        low = 'purple', mid = 'black', high = 'green', na.value = 'grey85',
+        limits = c(-2.5,2.5) )+ #approx: range(omics$Pro_TE, na.rm = T)
+      labs( title = 'Term genes & KD neighbors in NW',
+            subtitle = paste0('KD: ', kd, '\nTerm: ', term) )+
+      theme_graph(background = 'white')
+    ,
+    ncol = 2
+    
+  )
+}
+```
+
+
+The Biodomains with traced NW analyzed by wKDA include:  
+1) APP Metabolism  [2]
+2) Endolysosome [6] 
+== vv KDA results not complete vv ==
+3) Immune Response [8] 
+4) Lipid Metabolism [9]  
+5) Synapse [17] 
+6) Mitochondrial Metabolism [11]
+
+Explore the effects of NW filters on traces & KDs for these sets:
+• node & edge filtering effects
+• direct edge filter before vs after trace
+• nodes added by trace
+• common vs unique nodes across BD
+• KDA on full (i.e. not BD filtered) NW objects
+
+# Biodom NW analyses
+## APP Metabolism
+```{r}
+# synIDs of BD-specific NWs
+nw.tbl = nw.dirs %>% 
+  filter(bd == 'APP Metabolism') %>% 
+  select(bd, bd.filt, filt, dir, id)
+
+# # read NW obj into tibble
+# nw.tbl$net = map(
+#   nw.tbl$id,
+#   ~ read_graph( synGet(.x)$path, format = 'graphml' )
+#   )
+
+# summarize NW properties
+nw.tbl = bind_cols(
+  nw.tbl,
+  map_dfr(
+    1:nrow(nw.tbl),
+    ~ {
+      nw = read_graph( synGet(nw.tbl$id[.x])$path, format = 'graphml' )
+      tibble(
+      n_nodes = nw %>% V %>% length,
+      n_edges = nw %>% E %>% length,
+      avg_path_length = nw %>% average.path.length,
+      assortativity_coef = nw %>% assortativity(., types1 = V(.)),
+      connected_components = nw %>% no.clusters)
+      }
+    )
+)
+
+# synIDs of BD-specific wKDA results
+kda.tbl = kda.dirs %>% 
+  filter(bd == 'APP Metabolism') %>% 
+  select(bd, filt, dir, ef, id)
+
+```
+
+Traced NW properties
+```{r fig.width=8, fig.height=4}
+nw.tbl %>%
+  filter(bd.filt) %>% 
+  mutate(
+    bd.filt = if_else(bd.filt == T, 'bdFilt', 'anyBD'),
+    network = paste(dir, filt, sep = '_')
+  ) %>% 
+  select(network, n_nodes, n_edges) %>% 
+  pivot_longer(cols = c(-network), 
+               names_to = 'properties', 
+               values_to = 'val') %>% 
+  mutate(properties = factor(properties, 
+                             levels = c('n_nodes',
+                                        'n_edges', 
+                                        'avg_path_length',
+                                        'assortativity_coef',
+                                        'connected_components')) 
+         ) %>% 
+  ggplot(aes(network, val)) +
+  geom_bar(stat = 'identity', position = 'dodge')+
+  theme(legend.position = 'top',
+        axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1))+
+  labs(y = '',x = '')+
+  # scale_y_log10()+
+  facet_wrap(~properties, scales = 'free_y', ncol = 2)
+
+```
+
+
+```{r}
+kd.res = kda.tbl %>% 
+  filter(dir == 'undirected') %>% 
+  group_by(bd,filt,dir) %>%
+  summarise( kd = list(read_kda_res(id[ef == 0],id[ef == 1])) ) %>% 
+  unnest(kd) %>%  
+  left_join(., 
+            biodom %>% select(MODULE = GOterm_Name, Biodomain, color, abbr, label), 
+            by = 'MODULE')
+  
+```
+
+Top KDs
+```{r}
+kd.summary = kd.res %>% 
+  ungroup() %>% 
+  filter(ef1_fdr > -log10(0.05)
+         , MODULE %in% enr.bd$pathway[enr.bd$padj < 0.05]
+         , delta_fdr > 0
+         ) %>% 
+  group_by(NODE) %>% 
+  summarise(n_bd = length(unique(Biodomain)),
+            bds = list(unique(Biodomain)),
+            n_term = length(unique(MODULE)),
+            terms = list(unique(MODULE)),
+            min_fdr = signif( 10^-max(ef1_fdr), digits = 3),
+            max_delta = signif( max(delta_fdr), digits = 3) ) %>% 
+  arrange(desc(n_bd), desc(max_delta))
+
+DT::datatable(kd.summary %>% select(-bds, -terms))
+```
+
+```{r fig.width=10,fig.height=8}
+# p2 = 
+kd.res %>% 
+  ungroup() %>% 
+  filter(ef1_fdr > -log10(0.05)
+         # , MODULE %in% enr.bd$pathway[enr.bd$padj < 0.05]
+         , delta_fdr > 0
+         ) %>% 
+  ggplot(aes( ef1_fdr, delta_fdr ))+
+  labs(x = 'wKDA FDR ef1, -log10', y = '\u0394 FDR, ef1 - ef0', title = unique(kd.res$bd))+
+  # geom_abline(intercept = 0, slope =1, lty= 2, lwd = .5)+
+  geom_smooth(method = 'glm', lty = 2, lwd = .5, color = 'grey20')+
+  geom_vline(xintercept = 0, lwd = .5)+ geom_hline(yintercept = 0, lwd = .5) +
+  geom_point(aes(color = color
+                 # , text = paste0(NODE, '\n', MODULE, '\n', Biodomain)
+                 ))+
+  ggrepel::geom_label_repel(
+    data = subset( kd.res, ef1_fdr > -log10(0.05) 
+                   & MODULE %in% enr.bd$pathway[enr.bd$padj < 0.05]
+                   & delta_fdr > 0), 
+    aes(label = paste0(NODE, '\n', MODULE, '\n', Biodomain)),
+    size = 2, alpha = .7, min.segment.length = 0)+
+  facet_wrap(~filt)+ #, scales = 'free'
+  scale_color_identity(guide = 'none') #; plotly::ggplotly(p)
+
+# plotly::ggplotly(p2)
+```
+
+pull NW to view subgraphs
+```{r}
+nw = nw.tbl %>% 
+  filter(
+    dir == 'undirected', 
+    filt == 'node_edge', 
+    bd.filt == T
+    ) %>% 
+  pull(id) %>% 
+  synGet(.) %>% 
+  .$path %>% 
+  read_graph(., format = 'graphml' )
+```
+
+
+```{r fig.width=12,fig.height=8}
+p = suppressWarnings( plot_kd_subnet(nw, kd = 'GRIN2B',term = 'postsynaptic density') )
+p
+```
+
+```{r fig.width=12,fig.height=8}
+p = suppressWarnings( plot_kd_subnet(nw, kd = 'APP', term = 'regulation of apoptotic process') )
+p
+```
+
+```{r fig.width=12,fig.height=8}
+p = suppressWarnings( plot_kd_subnet(nw, kd = 'MAPT', term = 'positive regulation of neuron death') )
+p
+```
+
+```{r fig.width=12,fig.height=8}
+p = suppressWarnings( plot_kd_subnet(nw, kd = 'DLG1', term = 'neuron to neuron synapse') )
+p
+```
+
+```{r}
+kd = 'DLG1'
+term = 'neuron to neuron synapse'
+  
+vert_num <- match(kd, V(nw)$name)
+vert_neigh <- neighbors(nw, vert_num) %>% names()
+vert_neigh_num <- match(vert_neigh, V(nw)$name)
+
+term_num <- biodom %>%
+  filter(GOterm_Name == term) %>%
+  pull(symbol) %>% unlist() %>%
+  match(., V(nw)$name) %>% .[!is.na(.)]
+
+term_neigh <- map_chr(1:length(term_num),
+                      ~ neighbors(nw, term_num[.x]) %>% names())
+term_neigh_num <- match(term_neigh, V(nw)$name)
+
+g2 <- induced_subgraph(nw, c(vert_num, intersect(term_neigh, vert_neigh)))
+g3 <- induced_subgraph(nw, c(vert_num, term_neigh))
+
+cowplot::plot_grid(
+  
+  ggraph(g3, layout = 'linear', circular = TRUE) +
+    geom_edge_arc(alpha = .3, color = 'grey75') +
+    geom_node_point( shape = 21, color = "black", alpha = .3,
+      aes(size = TargetRiskScore, fill = Pro_EffectScore, filter= .N()$name != kd)  )+
+    geom_node_point( shape = 23, color = "black", alpha = .3,
+      aes(size = TargetRiskScore, fill = Pro_EffectScore, filter = .N()$name == kd) )+
+    geom_node_text(aes(label = name), size = 2) +
+    coord_fixed() +
+    scale_size_continuous( range = c(.5, 10), limits = c(0, 5), trans = 'exp')+
+    scale_fill_gradient2(
+      low = 'purple', mid = 'black', high = 'green', na.value = 'grey85',
+      limits = c(-2.5,2.5) )+ #approx: range(omics$Pro_TE, na.rm = T)
+    labs( title = 'All term genes in NW',
+          subtitle = paste0('KD: ', kd, '\nTerm: ', term) )+
+    theme_graph(background = 'white')
+  ,
+  ggraph(g2, layout = 'linear', circular = TRUE) +
+          geom_edge_arc(alpha = .3, color = 'grey75') +
+    geom_node_point( shape = 21, color = "black", alpha = .3,
+      aes(size = TargetRiskScore, fill = Pro_EffectScore, filter= .N()$name != kd)  )+
+    geom_node_point( shape = 23, color = "black", alpha = .3,
+      aes(size = TargetRiskScore, fill = Pro_EffectScore, filter = .N()$name == kd) )+
+    geom_node_text(aes(label = name), size = 2) +
+    coord_fixed() +
+    scale_size_continuous( range = c(.5, 10), limits = c(0, 5), trans = 'exp')+
+    scale_fill_gradient2(
+      low = 'purple', mid = 'black', high = 'green', na.value = 'grey85',
+      limits = c(-2.5,2.5) )+ #approx: range(omics$Pro_TE, na.rm = T)
+    labs( title = 'Term genes & KD neighbors in NW',
+          subtitle = paste0('KD: ', kd, '\nTerm: ', term) )+
+    theme_graph(background = 'white')
+  ,
+  ncol = 2
+  
+)
+
+```
+
+
+### KDA ~ CBrain phenotypes
+```{r}
+tmp <- kd %>% 
+  inner_join(
+    simple %>% 
+      filter(expt == 'CellRox',
+             cell == 'Glutamatergic Neuron' , 
+             `Hit Class` != 'Non-Hit'
+             ), 
+    ., 
+    by =c('Gene'='NODE')  
+    ) %>% 
+  group_by(nw, Gene, gene_score, color) %>% summarise(d = max(d), FDR_e1 = max(FDR_e1))
+
+hits = simple %>% 
+  filter(expt == 'CellRox', 
+         cell == 'Glutamatergic Neuron',
+         `Hit Class` != 'Non-Hit') %>% 
+  pull(Gene) %>% unique()
+
+nonhits = simple %>% 
+  filter(expt == 'CellRox', 
+         cell == 'Glutamatergic Neuron',
+         `Hit Class` == 'Non-Hit') %>% 
+  pull(Gene) %>% unique()
+
+
+x = bind_cols(
+  kd_by_biodom, 
+  pheno_kd = map_dbl( 1:nrow(kd_by_biodom), 
+                      ~ intersect( kd_by_biodom$riskEnr[[.x]] , hits) %>% length() ),
+  noPheno_kd = map_dbl( 1:nrow(kd_by_biodom), 
+                        ~ intersect( kd_by_biodom$riskEnr[[.x]] , nonhits) %>% length() ),
+  pheno_nokd = map_dbl( 1:nrow(kd_by_biodom), 
+                        ~ intersect( setdiff(kd_by_biodom$nodes[[.x]], 
+                                             kd_by_biodom$riskEnr[[.x]]) , hits) %>% length() ),
+  noPheno_nokd = map_dbl( 1:nrow(kd_by_biodom), 
+                        ~ intersect( setdiff(kd_by_biodom$nodes[[.x]], 
+                                             kd_by_biodom$riskEnr[[.x]]) , nonhits) %>% length() ),
+  ) %>% 
+  rowwise() %>% mutate(
+    fisher.p = matrix(c(pheno_kd, noPheno_kd, pheno_nokd, noPheno_nokd), nrow = 2) %>% 
+      fisher.test( ., alt = 'g') %>% broom::tidy() %>% pull(p.value)
+  ) 
+
+x$padj = p.adjust(x$fisher.p, method = 'BH')
+x = x %>% arrange(padj)
+
+cowplot::plot_grid( 
+  plotlist = map( 
+    which(x$padj < 0.05),
+    ~ plot( eulerr::euler(
+      c(pheno = length(hits), kd = length(x$kds[[.x]]), 
+        'pheno&kd' = x$pheno_kd[.x])), quantities = T ) %>%
+      ggplotify::as.ggplot() + 
+      ggtitle(label = x$nw[.x], 
+              subtitle = paste0('Fisher p (adj) = ',
+                                x$padj[.x] %>% signif(digits = 2))))) 
+
+```
+
+linear regression  ~ KDA FDR
+```{r fig.width=10, fig.height=8}
+
+y = map_dfr(
+    unique(tmp$nw),
+    ~ { bind_cols(
+        lm(abs(gene_score) ~ FDR_e1, data = tmp %>% filter(nw == .x)) %>% #, d > 0
+          broom::glance() %>% mutate(nw = .x, r = sqrt(r.squared)) %>% relocate(nw),
+        lm(abs(gene_score) ~ FDR_e1, data = tmp %>% filter(nw == .x)) %>% #, d > 0
+          broom::tidy() %>% filter(term != '(Intercept)') %>% select(estimate)
+    )
+        }
+    ) %>% arrange(p.value)
+
+tmp <- tmp %>% rowwise() %>% mutate(
+  nw = as.factor(nw),
+  nw = fct_relevel(nw, as.character(y$nw) %>% str_subset('All_NW', negate = T) )) %>% 
+  arrange(nw)
+
+ggplot(tmp, aes( FDR_e1, abs(gene_score) )) +
+  geom_point(#data = subset(tmp, d > 0),
+             aes(color = color,  size = d), alpha = .5) +
+  geom_hline(yintercept = 0, lty = 2)+
+  geom_vline(xintercept = 0, lty = 2)+
+  scale_size_continuous(name = 'KDA \u0394 FDR\ne1/e0', range = c(.5,3))+ 
+  # ggrepel::geom_label_repel(
+  #   data = subset(tmp, d > 0), aes(label = paste0(Gene,'\n', go)),
+  #   min.segment.length = 0, size = 2.5, max.overlaps = 12)+
+  scale_color_identity(guide = 'none')+
+  geom_smooth(method = 'lm')+
+  labs(y = 'CRISPRbrain phenotype score, absolute value',
+       x = 'KDA FDR, -log10') + 
+  facet_wrap(~nw, scales = 'free_x')
+
+```
+
+```{r}
+y %>% select(nw, p.value, r.squared, r,  estimate, nobs) %>% 
+  DT::datatable(x, rownames = F, options = list(pageLength = 16)) %>% 
+  DT::formatSignif(columns = c('r.squared', 'r', 'p.value', 'estimate'))
+```
+
+linear regression ~  KDA delta FDR e1/e0
+```{r fig.width=10, fig.height=8}
+
+y = map_dfr(
+    unique(tmp$nw),
+    ~ { bind_cols(
+        lm(abs(gene_score) ~ d, data = tmp %>% filter(nw == .x)) %>% #, d > 0
+          broom::glance() %>% mutate(nw = .x, r = sqrt(r.squared)) %>% relocate(nw),
+        lm(abs(gene_score) ~ d, data = tmp %>% filter(nw == .x)) %>% #, d > 0
+          broom::tidy() %>% filter(term != '(Intercept)') %>% select(estimate)
+    )
+        }
+    ) %>% arrange(p.value)
+
+tmp <- tmp %>% rowwise() %>% mutate(
+  nw = as.factor(nw),
+  nw = fct_relevel(nw, as.character(y$nw) %>% str_subset('All_NW', negate = T) )) %>% 
+  arrange(nw)
+
+ggplot(tmp, aes( d, abs(gene_score) )) +
+  geom_point(#data = subset(tmp, d > 0),
+             aes(color = color,  size = FDR_e1), alpha = .5) +
+  geom_hline(yintercept = 0, lty = 2)+
+  geom_vline(xintercept = 0, lty = 2)+
+  scale_size_continuous(name = 'KDA FDR\n-log10', range = c(.5,3))+ 
+  # ggrepel::geom_label_repel(
+  #   data = subset(tmp, d > 0), aes(label = paste0(Gene,'\n', go)),
+  #   min.segment.length = 0, size = 2.5, max.overlaps = 12)+
+  scale_color_identity(guide = 'none')+
+  geom_smooth(method = 'lm')+
+  labs(y = 'CRISPRbrain phenotype score, absolute value',
+       x = 'KDA \u0394 FDR e1/e0') + 
+  facet_wrap(~nw, scales = 'free_x')
+
+```
+
+## Endolysosome
+```{r}
+# synIDs of BD-specific NWs
+nw.tbl = nw.dirs %>% 
+  filter(bd == 'Endolysosome') %>% 
+  select(bd, bd.filt, filt, dir, id)
+
+# # read NW obj into tibble
+# nw.tbl$net = map(
+#   nw.tbl$id,
+#   ~ read_graph( synGet(.x)$path, format = 'graphml' )
+#   )
+
+# summarize NW properties
+nw.tbl = bind_cols(
+  nw.tbl,
+  map_dfr(
+    1:nrow(nw.tbl),
+    ~ {
+      nw = read_graph( synGet(nw.tbl$id[.x])$path, format = 'graphml' )
+      tibble(
+      n_nodes = nw %>% V %>% length,
+      n_edges = nw %>% E %>% length,
+      avg_path_length = nw %>% average.path.length,
+      assortativity_coef = nw %>% assortativity(., types1 = V(.)),
+      connected_components = nw %>% no.clusters)
+      }
+    )
+)
+
+# synIDs of BD-specific wKDA results
+kda.tbl = kda.dirs %>% 
+  filter(bd == 'Endolysosome') %>% 
+  select(bd, filt, dir, ef, id)
+
+```
+
+Traced NW properties
+```{r fig.width=8, fig.height=4}
+nw.tbl %>%
+  filter(bd.filt) %>% 
+  mutate(
+    bd.filt = if_else(bd.filt == T, 'bdFilt', 'anyBD'),
+    network = paste(dir, filt, sep = '_')
+  ) %>% 
+  select(network, n_nodes, n_edges) %>% 
+  pivot_longer(cols = c(-network), 
+               names_to = 'properties', 
+               values_to = 'val') %>% 
+  mutate(properties = factor(properties, 
+                             levels = c('n_nodes',
+                                        'n_edges', 
+                                        'avg_path_length',
+                                        'assortativity_coef',
+                                        'connected_components')) 
+         ) %>% 
+  ggplot(aes(network, val)) +
+  geom_bar(stat = 'identity', position = 'dodge')+
+  theme(legend.position = 'top',
+        axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1))+
+  labs(y = '',x = '')+
+  # scale_y_log10()+
+  facet_wrap(~properties, scales = 'free_y', ncol = 2)
+
+```
+
+
+```{r}
+kd.res = kda.tbl %>% 
+  filter(dir == 'undirected') %>% 
+  group_by(bd,filt,dir) %>%
+  summarise( kd = list(read_kda_res(id[ef == 0],id[ef == 1])) ) %>% 
+  unnest(kd) %>%
+  ungroup() %>% 
+  left_join(., 
+            biodom %>% select(MODULE = GOterm_Name, Biodomain, color, abbr, label), 
+            by = 'MODULE')
+  
+```
+
+
+
+```{r fig.width=10,fig.height=8}
+# p2 = 
+kd.res %>% 
+  ungroup() %>% 
+  filter(ef1_fdr > -log10(0.05)
+         # , MODULE %in% enr.bd$pathway[enr.bd$padj < 0.05]
+         , delta_fdr > 0
+         ) %>% 
+  ggplot(aes( ef1_fdr, delta_fdr ))+
+  labs(x = 'wKDA FDR ef1, -log10', y = '\u0394 FDR, ef1 - ef0', title = unique(kd.res$bd))+
+  # geom_abline(intercept = 0, slope =1, lty= 2, lwd = .5)+
+  geom_smooth(method = 'glm', lty = 2, lwd = .5, color = 'grey20')+
+  geom_vline(xintercept = 0, lwd = .5)+ geom_hline(yintercept = 0, lwd = .5) +
+  geom_point(aes(color = color
+                 # , text = paste0(NODE, '\n', MODULE, '\n', Biodomain)
+                 ))+
+  ggrepel::geom_label_repel(
+    data = subset( kd.res, ef1_fdr > -log10(0.05) 
+                   & MODULE %in% enr.bd$pathway[enr.bd$padj < 0.05]
+                   & delta_fdr > 0), 
+    aes(label = paste0(NODE, '\n', MODULE, '\n', Biodomain)),
+    size = 2, alpha = .7, min.segment.length = 0)+
+  facet_wrap(~filt)+ #, scales = 'free'
+  scale_color_identity(guide = 'none') #; plotly::ggplotly(p)
+
+# plotly::ggplotly(p2)
+```
+
+Top KDs
+```{r}
+kd.summary = kd.res %>% 
+  filter(ef1_fdr > -log10(0.05)
+         , MODULE %in% enr.bd$pathway[enr.bd$padj < 0.05]
+         , delta_fdr > 0
+         , filt == 'node_edge'
+         ) %>% 
+  group_by(NODE) %>% 
+  summarise(n_bd = length(unique(Biodomain)),
+            bds = list(unique(Biodomain)),
+            n_term = length(unique(MODULE)),
+            terms = list(unique(MODULE)),
+            min_fdr = signif( 10^-max(ef1_fdr), digits = 3),
+            max_delta = signif( max(delta_fdr), digits = 3) ) %>% 
+  arrange(desc(n_bd), desc(max_delta))
+
+DT::datatable(kd.summary %>% select(-bds, -terms))
+```
+
+pull NW to view subgraphs
+```{r}
+nw = nw.tbl %>% 
+  filter(
+    dir == 'undirected', 
+    filt == 'node_edge', 
+    bd.filt == T
+    ) %>% 
+  pull(id) %>% 
+  synGet(.) %>% 
+  .$path %>% 
+  read_graph(., format = 'graphml' )
+```
+
+
+```{r fig.width=12,fig.height=8}
+p = suppressWarnings( plot_kd_subnet(nw, kd = 'SNX9',term = 'clathrin-coated endocytic vesicle membrane') )
+p
+```
+
+```{r fig.width=12,fig.height=8}
+p = suppressWarnings( plot_kd_subnet(nw, kd = 'HIP1R', term = 'clathrin binding') )
+p
+```
+
+```{r fig.width=12,fig.height=8}
+p = suppressWarnings( plot_kd_subnet(nw, kd = 'SLC6A4', term = 'amyloid-beta binding') )
+p
+```
+<!-- ## Immune Response   -->
+<!-- ## Lipid Metabolism   -->
+<!-- ## Synapse -->
+<!-- ## Mitochondrial Metabolism -->
+
+
+
+# Session
+```{r}
+sessionInfo()
+```
+
