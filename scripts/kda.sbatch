@@ -3,8 +3,9 @@
 ##SBATCH --output=/projects/carter-lab/caryg/network_tracing/logs/batchtrace-%j.log  #!!
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=greg.cary@jax.org #!!
-#SBATCH --qos=batch
-##SBATCH --time=96:00:00
+##SBATCH --qos=batch
+##SBATCH --qos=long
+##SBATCH --time=6-00:00:00
 ##SBATCH --nodes=1
 ##SBATCH --ntasks=1
 ##SBATCH --cpus-per-task=12
