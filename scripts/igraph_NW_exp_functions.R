@@ -311,7 +311,10 @@ find_limit <- function ( s_path, t_path, weights, cores=1) {
       target_summary <- summary(
         scores[(scores > 0) & (is.na(scores) == F)]
       )
-      if (target_summary['Mean'] > target_summary['Median']) {
+      if( is.na(target_summary['Mean']) & is.na(target_summary['Median']) ){
+        limit <- NA
+      }
+      else if (target_summary['Mean'] > target_summary['Median']) {
         limit <- target_summary['Mean']
       }else{
         limit <- target_summary['Median']
@@ -331,7 +334,10 @@ find_limit <- function ( s_path, t_path, weights, cores=1) {
     sentinal_summary <- summary(
       sent_scores[(sent_scores > 0) & (is.na(sent_scores) == F)]
     )
-    if (sentinal_summary['Mean'] > sentinal_summary['Median']) {
+    if( is.na(sentinal_summary['Mean']) & is.na(sentinal_summary['Median']) ){
+      limit <- NA
+    }
+    else if (sentinal_summary['Mean'] > sentinal_summary['Median']) {
       limit <- sentinal_summary['Mean']
     }else{
       limit <- sentinal_summary['Median']
