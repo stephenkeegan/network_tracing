@@ -23,9 +23,15 @@ cd $working
 module load singularity
 
 ## exampl slurm batch job call:
-#for i in {1..19}; do sbatch scripts/batch_trace.sbatch $i dir node edge; done
+#for i in results/biodomain/*/queryList*; do sbatch scripts/batch_trace.sbatch $i dir node edge; done
 
-singularity exec $simg_path Rscript $working/scripts/biodom_nw_path_trace.R $1 $2 $3 $4
-# singularity exec $simg_path Rscript $working/scripts/biodom_nw_wKDA.R $1 $2 $3 $4
+# Biodomain NWs
+singularity exec $simg_path Rscript $working/scripts/Network_path_trace.R $1 $2 $3 $4 $5
+
+# Biodomain NWs
+singularity exec $simg_path Rscript $working/scripts/biodom_filter_traced_nw.R $1 $2 $3 $4 $5
+
+# # Pseudotime NWs
+# singularity exec $simg_path Rscript $working/scripts/pseudotime_nw_path_trace.R $1 $2 $3 $4 $5
 
 exit

@@ -43,17 +43,22 @@ biodom <- full_join(
   # biodomains
   readRDS(synGet('syn25428992')$path),
   # domain labels
-  read_csv(synGet('syn26856828')$path,
-           col_types = cols()),
+  read_csv(synGet('syn26856828')$path, col_types = cols()),
   by = c('Biodomain'='domain')
 ) %>%
   mutate(Biodomain = case_when(Biodomain == 'none' ~ NA_character_, T ~ Biodomain))
 
-domains <- biodom %>% pull(Biodomain) %>% unique() %>% sort() %>% .[!is.na(.)]
+# ROSMAP txomic PT
+rna.f.de <- read_csv( synapser::synGet('syn39989123')$path, col_types = cols() ) %>% rename(gene = gene_names)
+rna.f.enr <- read_tsv( synapser::synGet('syn47728345')$path, col_types = cols() )
+rna.m.de <- read_csv( synapser::synGet('syn39990047')$path, col_types = cols() ) %>% rename(gene = gene_names)
+rna.m.enr <- read_tsv( synapser::synGet('syn47728065')$path, col_types = cols() )
 
-# enriched biodomain terms
-enr.bd <- read_csv(synGet('syn45824995')$path, col_types = cols()) %>% 
-  mutate(leadingEdge_genes = str_split(leadingEdge_genes, '\\|'))
+# ROSMAP proteomic PT
+prot.f.de <- read_csv( synapser::synGet('syn40616521')$path, col_types = cols() ) %>% rename(gene = gene_short_name)
+prot.f.enr <- read_csv( synapser::synGet('syn50881293')$path, col_types = cols() )
+prot.m.de <- read_csv( synapser::synGet('syn40621972')$path, col_types = cols() ) %>% rename(gene = gene_short_name)
+prot.m.enr <- read_csv( synapser::synGet('syn50881295')$path, col_types = cols() )
 
 # base network
 net <- igraph::read_graph(synGet('syn51110930')$path, format = 'graphml') 
@@ -61,7 +66,7 @@ net <- igraph::read_graph(synGet('syn51110930')$path, format = 'graphml')
 # read arguments ----------------------------------------------------------
 
 # arguments
-# 1. biodomain index: 1..19
+# 1. pseudotime state: 2..7
 # 2. directed
 # 3. node filter
 # 4. edge filter
@@ -73,7 +78,8 @@ args <- commandArgs(trailingOnly = TRUE)
 
 cat('\narguments:\n',args, '\n')
 
-bd.idx <- args[ which( grepl("(?<!ef)[0-9]{1,2}", args, perl = T) ) ] %>% as.numeric()
+# bd.idx <- args[ which( grepl('[0-9]{1}', args) ) ] %>% as.numeric()
+pt.state <- args[ which( grepl('early|mid|late',args) ) ]
 directed <- any( grepl('dir', args) )
 filt_nodes <- any( grepl('node', args) )
 filt_edges <- any( grepl('edge', args) )
@@ -83,16 +89,16 @@ if(filt_cellType){ cellType <- args[ which( grepl('Exc|Inh|Astro|Micro', args) )
 edgyboi <- args[ which( grepl('ef1|ef0', args) ) ] %>% str_remove_all('ef') %>% as.numeric()
 
 # Specify which biodomain to trace
-dom <- domains[bd.idx]
-cat('\n\nBiodomain NW to trace: #', bd.idx, ', ', dom, '\n')
+cat('\n\nPseudotime state to trace: #', pt.state, '\n')
 cat('Trace directed edges?: ', directed, '\n')
 cat('Filter nodes for brain expression?: ', filt_nodes, '\n')
 cat('Filter edges for PMID evidence?: ', filt_edges, '\n')
-cat('Filter nodes for expression in certain cells?: ', filt_cellType, ', ', cellType)
+cat('Filter nodes for expression in certain cells?: ', filt_cellType)
+if(filt_cellType){cat('\n','Which cells?: ', cellType)}
 cat('Edge Factor for KDA weights?: ', edgyboi, '\n')
 # cat('Skip pathway tracing and only run wKDA?: ', noTrace, '\n\n')
 
-net_filename = dom %>% str_replace_all(.,' ','_')
+net_filename = paste0('prot_',pt.state)
 
 # filter base network -----------------------------------------------------
 
@@ -155,13 +161,8 @@ cat( 'Base network filtered.', '\n')
 
 # read traced NW objects
 trace.nw <- igraph::read_graph(
-  paste0( here::here(), '/results/',net_filename,'/',
+  paste0( here::here(), '/results/pseudotime/',net_filename,'/',
           net_filename, directionality, filt, '.graphml'),
-  format = "graphml"
-)
-trace.nw.bdFilt <- igraph::read_graph(
-  paste0( here::here(), '/results/',net_filename,'/',
-          'bdFiltered_', net_filename, directionality, filt , '.graphml'),
   format = "graphml"
 )
 
@@ -170,14 +171,14 @@ trace.nw.bdFilt <- igraph::read_graph(
 cat('\n\nStarting wKDA...\n')
 Sys.time()
 
-if( !(dir.exists( paste0(here::here(), '/results/',net_filename,'/kda') )) ){
-  dir.create( paste0(here::here(), '/results/',net_filename,'/kda') )
+if( !(dir.exists( paste0(here::here(), '/results/pseudotime/',net_filename,'/kda') )) ){
+  dir.create( paste0(here::here(), '/results/pseudotime/',net_filename,'/kda') )
 }
 
 ##
 # Remove redundant edges
 nw.simple <- igraph::simplify(
-  trace.nw.bdFilt,
+  trace.nw,
   remove.multiple = TRUE,
   remove.loops = FALSE,
   edge.attr.comb = list( 
@@ -229,8 +230,7 @@ biodom %>%
   select(MODULE = GOterm_Name, NODE = symbol) %>% 
   unnest_longer(NODE) %>% 
   filter(NODE != '') %>% 
-  distinct() %>% 
-  write_tsv(paste0(here::here(), '/results/', net_filename, '/kda/',
+  write_tsv(paste0(here::here(), '/results/pseudotime/', net_filename, '/kda/',
                    'module_file.tsv'))
 
 ##
@@ -243,8 +243,8 @@ kda.nw %>%
   ) %>%
   select(HEAD, TAIL, WEIGHT) %>% 
   distinct() %>% 
-  write_tsv(paste0(here::here(), '/results/', net_filename, '/kda/',
-                   net_filename, directionality, filt , '_network_file.tsv'))
+  write_tsv(paste0(here::here(), '/results/pseudotime/', net_filename, '/kda/',
+                   net_filename, directionality, filt , 'network_file.tsv'))
 
 edgybois <- c(0,1)
 
@@ -254,10 +254,10 @@ for(ef in edgyboi){
   job.kda <- list()
   # job.kda$label<-paste0(weight_type,'_',ef)  #filename
   job.kda$label<- paste0(net_filename, directionality, filt, '_addWeights_edgeFactor_',ef)  #filename
-  job.kda$folder<- paste0(here::here(), '/results/', net_filename,'/')  #path  , '_depth2'
-  job.kda$netfile <- paste0(here::here(), '/results/', net_filename, '/kda/', 
-                            net_filename, directionality, filt,'_network_file.tsv')
-  job.kda$modfile <- paste0(here::here(), '/results/', net_filename, '/kda/',
+  job.kda$folder<- paste0(here::here(), '/results/pseudotime/', net_filename,'/')  #path  , '_depth2'
+  job.kda$netfile <- paste0(here::here(), '/results/pseudotime/', net_filename, '/kda/', 
+                            net_filename, directionality, filt,'network_file.tsv')
+  job.kda$modfile <- paste0(here::here(), '/results/pseudotime/', net_filename, '/kda/',
                             'module_file.tsv')
   job.kda$edgefactor<- ef  #edgybois
   job.kda$depth<- 1

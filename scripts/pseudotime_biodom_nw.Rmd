@@ -49,13 +49,18 @@ bd_enr_res = read_csv(synapser::synGet('syn45824995')$path) %>%
   # filter(Biodomain != 'none') %>% 
   mutate(leadingEdge_genes = str_split(leadingEdge_genes, '\\|'))
 
-# pseudotime biodom enrichments
-prot.f <- synGet('syn47762627') %>% .$path %>% read_tsv()
-prot.m <- synGet('syn47762544') %>% .$path %>% read_tsv()
-r.rna.f <- synGet('syn47728345') %>% .$path %>% read_tsv() 
-r.rna.m <- synGet('syn47728065') %>% .$path %>% read_tsv() 
-# m.rna.f 
-# m.rna.m 
+# ROSMAP txomic PT
+rna.f.de <- read_csv( synapser::synGet('syn39989123')$path, col_types = cols() ) %>% rename(gene = gene_names)
+rna.f.enr <- read_tsv( synapser::synGet('syn47728345')$path, col_types = cols() )
+rna.m.de <- read_csv( synapser::synGet('syn39990047')$path, col_types = cols() ) %>% rename(gene = gene_names)
+rna.m.enr <- read_tsv( synapser::synGet('syn47728065')$path, col_types = cols() )
+
+# ROSMAP proteomic PT
+prot.f.de <- read_csv( synapser::synGet('syn40616521')$path, col_types = cols() ) %>% rename(gene = gene_short_name)
+prot.f.enr <- read_csv( synapser::synGet('syn50881293')$path, col_types = cols() )
+prot.m.de <- read_csv( synapser::synGet('syn40621972')$path, col_types = cols() ) %>% rename(gene = gene_short_name)
+prot.m.enr <- read_csv( synapser::synGet('syn50881295')$path, col_types = cols() )
+
 
 ```
 
@@ -184,6 +189,354 @@ ggplot(sig_explore, aes(n_leadingEdge_genes, as.factor(state) )) +
           )
 
 ```
+
+# Pseudotime states
+## prot
+```{r}
+prot <- bind_rows(prot.f.de %>% mutate(s = 'f'), prot.m.de %>% mutate(s = 'm')) %>% 
+    pivot_wider(id_cols = c(gene_names, gene, state), 
+                values_from = c(pvalue, effect), names_from = s) %>% 
+    rowwise() %>% 
+    mutate(sig = case_when( 
+        (pvalue_f <= 0.01 & pvalue_m > 0.01) ~ 'f_only',
+        (pvalue_m <= 0.01 & pvalue_f > 0.01) ~ 'm_only',
+        (pvalue_f > 0.01 & pvalue_m > 0.01) ~ 'neither',
+        (pvalue_f <= 0.01 & pvalue_m <= 0.01) ~ 'both'),
+        mn = mean(-log10(pvalue_f), -log10(pvalue_m), na.rm = T))
+```
+
+```{r fig.width=7, fig.height=5}
+prot %>% 
+  filter(sig != 'neither') %>% 
+  ggplot(aes(effect_f, effect_m))+
+  geom_hline(yintercept = 0, lwd =.1)+geom_vline(xintercept = 0, lwd =.1)+
+  geom_point(aes(color = sig, size = mn), alpha = 0.3)+
+  scale_size_continuous('mean -log10 pval', range = c(.1,2))+
+  theme(legend.position = 'bottom')+
+  facet_grid(sig~state)
+```
+
+```{r fig.width=9, fig.height=3}
+
+cowplot::plot_grid(
+  prot %>% 
+    filter(sig != 'neither') %>% 
+    group_by(state, sig) %>% 
+    summarise(n_gene = length(unique(gene))) %>% 
+    ggplot(aes(state, n_gene))+
+    geom_col()+
+    labs(subtitle = 'any effect direction')+
+    facet_wrap(~sig),
+  prot %>% 
+    filter(sig == 'both', effect_f/effect_m > 0) %>% 
+    group_by(state, sig) %>% 
+    summarise(n_gene = length(unique(gene))) %>% 
+    ggplot(aes(state, n_gene))+
+    geom_col()+
+    labs(subtitle = 'same effect direction')+
+    facet_wrap(~sig)
+  , rel_widths = c(1,.4)
+)
+
+```
+
+```{r fig.width=9, fig.height=3}
+
+tmp = prot %>% 
+  filter (sig == 'both', effect_f/effect_m > 0 ) 
+
+olap = crossing(st1 = unique(tmp$state), st2 = unique(tmp$state)) %>% 
+  rowwise() %>% 
+  mutate(
+    olap = length(intersect(
+      tmp %>% filter(state == st1) %>% pull(gene),
+      tmp %>% filter(state == st2) %>% pull(gene) )),
+    pct = olap / length(tmp %>% filter(state == st1) %>% pull(gene))
+  ) %>% ungroup() %>% 
+  mutate(st1 = factor(st1, levels = rev(c('1','2','3','4','5','6','7')) ),
+         st2 = factor(st2, levels = c('1','2','3','4','5','6','7')))
+
+```
+
+```{r}
+ggplot(olap, aes(x = st2, y = st1)) +
+  geom_tile(aes(fill=pct), alpha = .8) + theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1)) +
+  viridis::scale_fill_viridis("% Total", option = "C", direction = -1)+
+  geom_text(aes(label = paste0(olap,'\n',signif(100*pct, 3), '%') ), size = 3) +
+  labs(x='',y='', title = 'Proteomics Pseudotime State DE Genes') 
+```
+
+```{r fig.width=9, fig.height=3}
+
+tmp = prot %>% 
+  filter (sig == 'both', effect_f/effect_m > 0 ) %>% 
+  mutate( state = case_when(
+    state %in% c(2,3,4) ~ 'early', 
+    state %in% c(5,6) ~ 'mid',
+    state %in% c(7) ~ 'late',
+    T ~ as.character(state)) )
+
+olap = crossing(st1 = unique(tmp$state), st2 = unique(tmp$state)) %>% 
+  rowwise() %>% 
+  mutate(
+    olap = length(intersect(
+      tmp %>% filter(state == st1) %>% pull(gene),
+      tmp %>% filter(state == st2) %>% pull(gene) )),
+    pct = olap / length(tmp %>% filter(state == st1) %>% pull(gene))
+  ) %>% ungroup() %>% 
+  # mutate(st1 = factor(st1, levels = rev(c('early','5','6','7')) ),
+  #        st2 = factor(st2, levels = c('early','5','6','7')))
+    mutate(st1 = factor(st1, levels = rev(c('early','mid','late')) ),
+         st2 = factor(st2, levels = c('early','mid','late')))
+
+```
+
+```{r}
+ggplot(olap, aes(x = st2, y = st1)) +
+  geom_tile(aes(fill=pct), alpha = .8) + theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1)) +
+  viridis::scale_fill_viridis("% Total", option = "C", direction = -1)+
+  geom_text(aes(label = paste0(olap,'\n',signif(100*pct, 3), '%') ), size = 3) +
+  labs(x='',y='', title = 'Proteomics Pseudotime State DE Genes') 
+```
+
+## rna
+```{r}
+rna <- bind_rows(rna.f.de %>% mutate(s = 'f'), 
+                 bind_rows(rna.m.de, rna.m.de %>% filter(state == 6) %>% mutate(state = 7)) %>% 
+                   mutate(s = 'm')) %>% 
+    pivot_wider(id_cols = c(gene, state), 
+                values_from = c(pvalue, effect), 
+                names_from = s) %>% 
+    rowwise() %>% 
+    mutate(sig = case_when( 
+        (pvalue_f <= 0.001 & pvalue_m > 0.001) ~ 'f_only',
+        (pvalue_m <= 0.001 & pvalue_f > 0.001) ~ 'm_only',
+        (pvalue_f > 0.001 & pvalue_m > 0.001) ~ 'neither',
+        (pvalue_f <= 0.001 & pvalue_m <= 0.001) ~ 'both'),
+        mn = mean(-log10(pvalue_f), -log10(pvalue_m), na.rm = T))
+```
+
+```{r fig.width=7, fig.height=5}
+rna %>% 
+  filter(sig != 'neither') %>% 
+  ggplot(aes(effect_f, effect_m))+
+  geom_hline(yintercept = 0, lwd =.1)+geom_vline(xintercept = 0, lwd =.1)+
+  geom_point(aes(color = sig, size = mn), alpha = 0.3)+
+  scale_size_continuous('mean -log10 pval', range = c(.1,2))+
+  theme(legend.position = 'bottom')+
+  facet_grid(sig~state)
+```
+
+```{r fig.width=9, fig.height=3}
+
+cowplot::plot_grid(
+  rna %>% 
+    filter(sig != 'neither') %>% 
+    group_by(state, sig) %>% 
+    summarise(n_gene = length(unique(gene))) %>% 
+    ggplot(aes(state, n_gene))+
+    geom_col()+
+    labs(subtitle = 'any effect direction')+
+    facet_wrap(~sig),
+  rna %>% 
+    filter(sig == 'both', effect_f/effect_m > 0) %>% 
+    group_by(state, sig) %>% 
+    summarise(n_gene = length(unique(gene))) %>% 
+    ggplot(aes(state, n_gene))+
+    geom_col()+
+    labs(subtitle = 'same effect direction')+
+    facet_wrap(~sig)
+  , rel_widths = c(1,.4)
+)
+
+```
+
+```{r fig.width=9, fig.height=3}
+
+tmp = rna %>% 
+  filter (sig == 'both', effect_f/effect_m > 0 ) %>% 
+  mutate( state = case_when(
+    state %in% c(2,3) ~ 'early', 
+    state %in% c(4,5) ~ 'mid', 
+    T ~ as.character(state)) )
+
+
+olap = crossing(st1 = unique(tmp$state), st2 = unique(tmp$state)) %>% 
+  rowwise() %>% 
+  mutate(
+    olap = length(intersect(
+      tmp %>% filter(state == st1) %>% pull(gene),
+      tmp %>% filter(state == st2) %>% pull(gene) )),
+    pct = olap / length(unique(tmp %>% filter(state == st1) %>% pull(gene)))
+  ) %>% ungroup()  %>% 
+  mutate(st1 = factor(st1, levels = rev(c('early', 'mid','6','7')) ),
+         st2 = factor(st2, levels = c('early', 'mid','6','7')))
+
+```
+
+```{r}
+ggplot(olap, aes(x = st2, y = st1)) +
+  geom_tile(aes(fill=pct), alpha = .8) + theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1)) +
+  viridis::scale_fill_viridis("% Total", option = "C", direction = -1)+
+  geom_text(aes(label = paste0(olap,'\n',signif(100*pct, 3), '%') ), size = 3) +
+  labs(x='',y='', title = 'Transcriptomics Pseudotime State DE Genes') 
+```
+
+## combined
+```{r}
+rna <- bind_rows(rna.f.de %>% mutate(s = 'f'), 
+                 bind_rows(rna.m.de, rna.m.de %>% filter(state == 6) %>% mutate(state = 7)) %>% 
+                   mutate(s = 'm')) %>% 
+    pivot_wider(id_cols = c(gene, state), 
+                values_from = c(pvalue, effect), 
+                names_from = s) %>% 
+    rowwise() %>% 
+    mutate(sig = case_when( 
+        (pvalue_f <= 0.001 & pvalue_m > 0.001) ~ 'f_only',
+        (pvalue_m <= 0.001 & pvalue_f > 0.001) ~ 'm_only',
+        (pvalue_f > 0.001 & pvalue_m > 0.001) ~ 'neither',
+        (pvalue_f <= 0.001 & pvalue_m <= 0.001) ~ 'both'),
+        mn = mean(-log10(pvalue_f), -log10(pvalue_m), na.rm = T))
+```
+
+```{r fig.width=7, fig.height=5}
+rna %>% 
+  filter(sig != 'neither') %>% 
+  ggplot(aes(effect_f, effect_m))+
+  geom_hline(yintercept = 0, lwd =.1)+geom_vline(xintercept = 0, lwd =.1)+
+  geom_point(aes(color = sig, size = mn), alpha = 0.3)+
+  scale_size_continuous('mean -log10 pval', range = c(.1,2))+
+  theme(legend.position = 'bottom')+
+  facet_grid(sig~state)
+```
+
+```{r fig.width=9, fig.height=3}
+
+cowplot::plot_grid(
+  rna %>% 
+    filter(sig != 'neither') %>% 
+    group_by(state, sig) %>% 
+    summarise(n_gene = length(unique(gene))) %>% 
+    ggplot(aes(state, n_gene))+
+    geom_col()+
+    labs(subtitle = 'any effect direction')+
+    facet_wrap(~sig),
+  rna %>% 
+    filter(sig == 'both', effect_f/effect_m > 0) %>% 
+    group_by(state, sig) %>% 
+    summarise(n_gene = length(unique(gene))) %>% 
+    ggplot(aes(state, n_gene))+
+    geom_col()+
+    labs(subtitle = 'same effect direction')+
+    facet_wrap(~sig)
+  , rel_widths = c(1,.4)
+)
+
+```
+
+```{r fig.width=9, fig.height=3}
+
+tmp = rna %>% 
+  filter (sig == 'both', effect_f/effect_m > 0 ) %>% 
+  mutate( state = case_when(
+    state %in% c(2,3) ~ 'early', 
+    state %in% c(4,5) ~ 'mid', 
+    T ~ as.character(state)) )
+
+
+olap = crossing(st1 = unique(tmp$state), st2 = unique(tmp$state)) %>% 
+  rowwise() %>% 
+  mutate(
+    olap = length(intersect(
+      tmp %>% filter(state == st1) %>% pull(gene),
+      tmp %>% filter(state == st2) %>% pull(gene) )),
+    pct = olap / length(unique(tmp %>% filter(state == st1) %>% pull(gene)))
+  ) %>% ungroup()  %>% 
+  mutate(st1 = factor(st1, levels = rev(c('early', 'mid','6','7')) ),
+         st2 = factor(st2, levels = c('early', 'mid','6','7')))
+
+```
+
+```{r}
+ggplot(olap, aes(x = st2, y = st1)) +
+  geom_tile(aes(fill=pct), alpha = .8) + theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1)) +
+  viridis::scale_fill_viridis("% Total", option = "C", direction = -1)+
+  geom_text(aes(label = paste0(olap,'\n',signif(100*pct, 3), '%') ), size = 3) +
+  labs(x='',y='', title = 'Transcriptomics Pseudotime State DE Genes') 
+```
+
+# Networks
+## early
+## mid
+## late
+# Key Drivers
+
+## early
+```{r}
+e0 <- read_tsv('/projects/carter-lab/caryg/network_tracing/results/pseudotime/prot_early/kda/prot_early_undirected_filt_node_edge_addWeights_edgeFactor_0.results.txt', col_types = cols())
+e1 <- read_tsv('/projects/carter-lab/caryg/network_tracing/results/pseudotime/prot_early/kda/prot_early_undirected_filt_node_edge_addWeights_edgeFactor_1.results.txt', col_types = cols())
+e1_top <- read_tsv('/projects/carter-lab/caryg/network_tracing/results/pseudotime/prot_early/kda/prot_early_undirected_filt_node_edge_addWeights_edgeFactor_1.tophits.txt', col_types = cols()) %>% 
+  filter(FDR <= 0.05) %>% 
+  mutate(kd = paste0(NODE,':',MODULE))
+```
+
+```{r fig.width=12, fig.height=10}
+tmp <- bind_rows( e0 %>% mutate(ef = 'ef0_fdr'), e1 %>% mutate(ef = 'ef1_fdr')) %>%
+  mutate(FDR = -log10(FDR)) %>%
+  pivot_wider(id_cols = c(MODULE, NODE, MEMBER), names_from = ef, values_from = FDR) %>%
+  mutate(across(contains('_fdr'), ~ if_else(is.na(.x), 0, .x))) %>% 
+  mutate(delta_fdr = ef1_fdr - ef0_fdr) %>% arrange(desc(delta_fdr)) %>% 
+  mutate(top_kd = if_else( paste0(NODE,':',MODULE) %in% e1_top$kd, 1, 0)) %>% 
+  # rowwise() %>% 
+  # mutate(MODULE = MODULE %>% str_split_fixed(., '_G:', 2) %>% .[1,2]) %>% 
+  distinct() %>% 
+  left_join(.,
+            biodom %>% select(MODULE = GOterm_Name, Biodomain, abbr:color),
+            by = 'MODULE')
+
+early.enr.terms <- prot.f.enr %>% filter(state %in% 2:4, padj < 0.05) %>% pull(pathway)
+mid.enr.terms <- prot.f.enr %>% filter(state %in% 5:6, padj < 0.05) %>% pull(pathway)
+
+ggplot(tmp %>% filter(MODULE %in% early.enr.terms), 
+       aes( ef1_fdr, delta_fdr ))+
+  labs(x = 'wKDA FDR ef1, -log10', y = '\u0394 FDR, ef1 - ef0', 
+       # subtitle = 'signif KDs (EF1 FDR < 0.05), \u0394 FDR > 0'
+       subtitle = 'Early Pseudotime Branch NW KDs'
+       )+
+  geom_abline(intercept = 0, slope =1, lty= 2, lwd = .5)+
+  geom_smooth(method = 'glm', lty = 2, lwd = .5, color = 'grey20')+
+  geom_vline(xintercept = 0, lwd = .5)+ geom_hline(yintercept = 0, lwd = .5) +
+  geom_point(alpha = .2, size = 1, aes(color = color) )+
+  geom_point(data = subset(tmp, ef1_fdr > -log10(0.05) 
+                           & top_kd == 1
+                           & delta_fdr > 0
+                           & MODULE %in% early.enr.terms
+                           # & cell_filt == 'Micro'
+                           )
+             , alpha = .6, size = 2, aes(color = color))+
+  ggrepel::geom_label_repel(
+    data = subset( tmp, ef1_fdr > -log10(0.05)
+                   & top_kd == 1
+                   & MODULE %in% early.enr.terms
+                   & delta_fdr > 0
+                   # & cell_filt == 'Micro'
+                   ),
+    aes(label = paste0(NODE, '\n', MODULE)), #, '\n', Biodomain
+    size = 2, alpha = .7, min.segment.length = 0)+
+  facet_wrap(~Biodomain, scales = 'free')+ #
+  scale_color_identity(guide = 'none') #; plotly::ggplotly(p)
+
+# plotly::ggplotly(p2)
+```
+## mid
+
+## late
+
+
 # Enriched biodomains 
 
 ```{r fig.height=7, fig.width=10}

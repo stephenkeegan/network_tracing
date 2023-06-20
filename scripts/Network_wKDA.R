@@ -27,16 +27,12 @@ theme_set(theme_bw())
 
 cat('\npackages loaded:\n', packages, '\n')
 
-
 # read data ---------------------------------------------------------------
 
 synLogin()
 
-# target risk scores
-scores <- read_csv(synTableQuery('select * from syn25575156', 
-                                 includeRowIdAndRowVersion = F)$filepath,
-                   col_types = cols()
-                   )
+# risk scores
+scores <- read_csv(synTableQuery('select * from syn25575156', includeRowIdAndRowVersion = F)$filepath)
 
 # biological domain annotations
 biodom <- full_join(
@@ -51,29 +47,25 @@ biodom <- full_join(
 
 domains <- biodom %>% pull(Biodomain) %>% unique() %>% sort() %>% .[!is.na(.)]
 
-# enriched biodomain terms
-enr.bd <- read_csv(synGet('syn45824995')$path, col_types = cols()) %>% 
-  mutate(leadingEdge_genes = str_split(leadingEdge_genes, '\\|'))
-
 # base network
 net <- igraph::read_graph(synGet('syn51110930')$path, format = 'graphml') 
 
 # read arguments ----------------------------------------------------------
 
 # arguments
-# 1. biodomain index: 1..19
-# 2. directed
+# 1. query filepath
+# 2. trace directed 
 # 3. node filter
 # 4. edge filter
-# 5. don't trace NW (only wKDA existing NW)
-# 6. cell type
+# 5. cell type
 
 # parse args and establish settings
 args <- commandArgs(trailingOnly = TRUE)
 
 cat('\narguments:\n',args, '\n')
 
-bd.idx <- args[ which( grepl("(?<!ef)[0-9]{1,2}", args, perl = T) ) ] %>% as.numeric()
+# parse args
+query.file <- args[ which( grepl('\\.txt|\\.tsv', args) ) ] 
 directed <- any( grepl('dir', args) )
 filt_nodes <- any( grepl('node', args) )
 filt_edges <- any( grepl('edge', args) )
@@ -82,99 +74,66 @@ filt_cellType <- any( grepl('Exc|Inh|Astro|Micro', args) )
 if(filt_cellType){ cellType <- args[ which( grepl('Exc|Inh|Astro|Micro', args) ) ] }
 edgyboi <- args[ which( grepl('ef1|ef0', args) ) ] %>% str_remove_all('ef') %>% as.numeric()
 
-# Specify which biodomain to trace
-dom <- domains[bd.idx]
-cat('\n\nBiodomain NW to trace: #', bd.idx, ', ', dom, '\n')
-cat('Trace directed edges?: ', directed, '\n')
+# report args
+full_path = normalizePath(query.file) %>% dirname()
+working_path = normalizePath(query.file) %>% dirname() %>% basename()
+cat('\n\nMove to dir: ',  full_path , '\n')
+setwd(full_path)
+cat('Query file to trace: ', query.file, '\n')
+cat('File found in current path?: ', basename(query.file) %in% list.files(), '\n')
+cat('Name of working directory: ', working_path, '\n\n')
+
+cat('PATH TRACE OPTIONS\nTrace directed edges?: ', directed, '\n')
 cat('Filter nodes for brain expression?: ', filt_nodes, '\n')
 cat('Filter edges for PMID evidence?: ', filt_edges, '\n')
-cat('Filter nodes for expression in certain cells?: ', filt_cellType, ', ', cellType)
+cat('Filter nodes for expression in certain cells?: ', filt_cellType, '\n')
+if(filt_cellType){ cat('Analyze NW in: ', cellType, '\n') }
 cat('Edge Factor for KDA weights?: ', edgyboi, '\n')
 # cat('Skip pathway tracing and only run wKDA?: ', noTrace, '\n\n')
 
-net_filename = dom %>% str_replace_all(.,' ','_')
-
-# filter base network -----------------------------------------------------
-
-cat('\n\n','Filtering Pathway Commons network based on specifications...','\n')
-
+# set filters -------------------------------------------------------------
 
 # nodes & edges
 if( filt_edges & filt_nodes ){
-  tmp <- igraph::delete_vertices(
-    net,
-    igraph::V(net)[ igraph::V(net)$brain_exp == 0 ]
-  )
-  nw <- igraph::subgraph.edges(
-    tmp,
-    igraph::E(tmp)[ igraph::E(tmp)$n_edge_evidence > 1 ],
-    delete.vertices = T 
-  )
   filt = '_filt_node_edge'
 } else if( filt_nodes ){
-  nw <- igraph::delete_vertices(
-    net,
-    igraph::V(net)[ igraph::V(net)$brain_exp == 0 ]
-  )
   filt = '_filt_node'
 } else if( filt_edges ){
-  nw <- igraph::subgraph.edges(
-    net,
-    igraph::E(net)[ igraph::E(net)$n_edge_evidence > 1 ],
-    delete.vertices = T 
-  )
   filt = '_filt_edge'
 } else { 
-  nw <- net
   filt = '_filt_none'
 }
 
 # cell type
 if( filt_cellType ){
-  nw <- igraph::delete_vertices(
-    nw,
-    V(nw)[ which( vertex_attr(nw, cellType) %in% c(0, NaN) ) ]
-  )
   filt = paste0(filt,'_',cellType)
 }
 
 # directionality
 if( directed ){
-  nw <- igraph::subgraph.edges( 
-    nw, 
-    igraph::E(nw)[ igraph::E(nw)$directed == 1 ],
-    delete.vertices = T 
-  ) %>% 
-    as.directed(mode = 'arbitrary')
   directionality = '_directed'  
 } else { 
   directionality = '_undirected'
 }
-
-cat( 'Base network filtered.', '\n')
-
-# read traced NW objects
-trace.nw <- igraph::read_graph(
-  paste0( here::here(), '/results/',net_filename,'/',
-          net_filename, directionality, filt, '.graphml'),
-  format = "graphml"
-)
-trace.nw.bdFilt <- igraph::read_graph(
-  paste0( here::here(), '/results/',net_filename,'/',
-          'bdFiltered_', net_filename, directionality, filt , '.graphml'),
-  format = "graphml"
-)
 
 # wKDA --------------------------------------------------------------------
 
 cat('\n\nStarting wKDA...\n')
 Sys.time()
 
-if( !(dir.exists( paste0(here::here(), '/results/',net_filename,'/kda') )) ){
-  dir.create( paste0(here::here(), '/results/',net_filename,'/kda') )
+# start a directory
+if( !(dir.exists( paste0(full_path,'/kda') )) ){
+  dir.create( paste0(full_path,'/kda') )
 }
 
-##
+# read traced, filtered NW objects
+trace.nw.bdFilt <- igraph::read_graph(
+  paste0( full_path, '/',
+          'bdFiltered_', working_path,directionality, filt,
+          '.graphml'),
+  format = "graphml"
+)
+
 # Remove redundant edges
 nw.simple <- igraph::simplify(
   trace.nw.bdFilt,
@@ -197,7 +156,7 @@ nw.simple <- igraph::simplify(
   )
 )
 
-##
+
 # Add TREAT-AD scores to edge attributes
 kda.nw <- tibble( ea = edge.attributes(nw.simple) ) %>% 
   t() %>% as_tibble(rownames = NA, .name_repair = 'unique') %>% 
@@ -230,8 +189,7 @@ biodom %>%
   unnest_longer(NODE) %>% 
   filter(NODE != '') %>% 
   distinct() %>% 
-  write_tsv(paste0(here::here(), '/results/', net_filename, '/kda/',
-                   'module_file.tsv'))
+  write_tsv(paste0(full_path, '/kda/', 'module_file.tsv'))
 
 ##
 # generate network file
@@ -243,22 +201,21 @@ kda.nw %>%
   ) %>%
   select(HEAD, TAIL, WEIGHT) %>% 
   distinct() %>% 
-  write_tsv(paste0(here::here(), '/results/', net_filename, '/kda/',
-                   net_filename, directionality, filt , '_network_file.tsv'))
+  write_tsv(paste0(full_path, '/kda/', 
+                   working_path, directionality, filt , 
+                   '_network_file.tsv'))
 
 edgybois <- c(0,1)
-
 for(ef in edgyboi){
   
   ### Setup KDA job
   job.kda <- list()
   # job.kda$label<-paste0(weight_type,'_',ef)  #filename
-  job.kda$label<- paste0(net_filename, directionality, filt, '_addWeights_edgeFactor_',ef)  #filename
-  job.kda$folder<- paste0(here::here(), '/results/', net_filename,'/')  #path  , '_depth2'
-  job.kda$netfile <- paste0(here::here(), '/results/', net_filename, '/kda/', 
-                            net_filename, directionality, filt,'_network_file.tsv')
-  job.kda$modfile <- paste0(here::here(), '/results/', net_filename, '/kda/',
-                            'module_file.tsv')
+  job.kda$label<- paste0(working_path, directionality, filt, '_addWeights_edgeFactor_',ef)  #filename
+  job.kda$folder<- paste0(full_path)  #path  , '_depth2'
+  job.kda$netfile <- paste0(full_path, '/kda/', 
+                            working_path, directionality, filt,'_network_file.tsv')
+  job.kda$modfile <- paste0(full_path, '/kda/', 'module_file.tsv')
   job.kda$edgefactor<- ef  #edgybois
   job.kda$depth<- 1
   if(directed) {job.kda$direction <- 1} else {job.kda$direction <- 0}

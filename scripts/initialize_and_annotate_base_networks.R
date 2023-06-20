@@ -131,11 +131,21 @@ foo <- synStore(
 
 synLogin()
 
-# target risk scores
+###
+# TREAT-AD scores
+
 scores <- read_csv(synTableQuery('select * from syn25575156', includeRowIdAndRowVersion = F)$filepath)
 omics <- read_csv(synTableQuery('select * from syn22758536',  includeRowIdAndRowVersion = F)$filepath)
 
+tad.deg <- scores %>% 
+  filter(isScored_omics == 'Y', OmicsScore > 0) %>% 
+  pull(GeneName) %>% 
+  .[!is.na(.)] %>% 
+  unique()
+
+###
 # Human protein atlas info
+
 tissue.array <- read_csv(synGet('syn51074598')$path)
 
 # Specify brain tissue types
@@ -145,9 +155,6 @@ hpa.brain.tissues <- c(
   "choroid plexus", "substantia nigra"
 )
 
-# SEA-AD scRNA-seq data
-seaad <- read_csv(synGet('syn51080312')$path, guess_max = 7.5e5)
-
 # ID brain expressed genes
 hpa.brain <- tissue.array %>% 
   filter(
@@ -156,35 +163,44 @@ hpa.brain <- tissue.array %>%
     Reliability %in% c('Enhanced','Supported','Approved') ) %>% 
   pull(Gene.name) %>% unique()
 
-tad.deg <- scores %>% 
-  filter(isScored_omics == 'Y', OmicsScore > 0) %>% 
-  pull(GeneName) %>% unique()
+###
+# SEA-AD scRNA-seq data
 
-seaad.expr <- seaad %>% 
-  filter(mean > 1) %>% 
+seaad <- read_csv(synGet('syn51658024')$path, guess_max = 7.5e5)
+# seaad.broad <- read_csv(synGet('syn51658025')$path, guess_max = 2e5)
+
+seaad.expr <- seaad %>%
+  filter( upperQ_exp >= -2.5 * fxn_exp + 2.3 ) %>%
   pull(gene) %>% unique()
 
+# Combined
 brain.genes <- union(hpa.brain, tad.deg) %>% union(., seaad.expr)
 
+###
 # Generate cell type specific expression table
-cellTypeExpr <- seaad %>% 
+
+cellTypeExpr <- seaad %>%
   
   # filter out low expression
-  filter(mean > 1) %>% 
-  select(gene, broad, cellType, group) %>% 
+  filter( upperQ_exp >= -2.5 * fxn_exp + 2.5) %>%
   
-  # only keep genes that are detected above threshold in the same cell in multiple groups
-  group_by(cellType) %>% filter(duplicated(gene)) %>% ungroup() %>% 
+  # # only keep genes that are detected above threshold in the same cell in multiple groups
+  # # don't do this for now, only removes 757 genes including some hallmark genes (MTHFR, CTSH, etc)
+  # group_by(cellType) %>% filter(duplicated(gene), .preserve = T) %>% ungroup() %>%
   
   # retain only gene and broad cell type specification
-  select(-cellType, -group) %>% distinct() %>% 
+  select(gene, broad) %>% distinct() %>%
   
   # pivot the table so there are 1's and 0's to indicate if a gene is expressed in each cell class
-  mutate(val = 1) %>% 
-  pivot_wider(id_cols = gene, names_from = broad, values_from = val) %>% 
-  mutate(across(.cols = -gene, ~ if_else(is.na(.x), 0, .x))) %>% 
+  mutate(val = 1) %>%
+  pivot_wider(
+    id_cols = gene,
+    names_from = broad,
+    values_from = val,
+    values_fill = 0
+  ) %>% 
   rename(Micro = `Micro-PVM`)
-
+  
 
 # annotate nodes & edges --------------------------------------------------
 
@@ -192,6 +208,13 @@ cellTypeExpr <- seaad %>%
 net <- igraph::read_graph(synGet('syn51080932')$path, format = 'graphml') 
 
 # edge directionality
+directed_edge_types = c("catalysis-precedes",
+                        "controls-expression-of",
+                        "controls-phosphorylation-of",
+                        "controls-state-change-of",
+                        "controls-transport-of"
+)
+
 x = tibble( edge = E(net)$interaction ) %>% 
   mutate(
     directed = if_else(edge %in% directed_edge_types, 1, 0)

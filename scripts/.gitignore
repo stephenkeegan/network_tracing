@@ -1,4 +1,5 @@
 igraphNetworkExpansion
 networktracing
+*.Rdata
 *.nb.html
 *.html

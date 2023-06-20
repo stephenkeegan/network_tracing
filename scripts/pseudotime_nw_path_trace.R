@@ -38,22 +38,17 @@ scores <- read_csv(synTableQuery('select * from syn25575156',
                    col_types = cols()
                    )
 
-# biological domain annotations
-biodom <- full_join(
-  # biodomains
-  readRDS(synGet('syn25428992')$path),
-  # domain labels
-  read_csv(synGet('syn26856828')$path,
-           col_types = cols()),
-  by = c('Biodomain'='domain')
-) %>%
-  mutate(Biodomain = case_when(Biodomain == 'none' ~ NA_character_, T ~ Biodomain))
+# ROSMAP txomic PT
+rna.f.de <- read_csv( synapser::synGet('syn39989123')$path, col_types = cols() ) %>% rename(gene = gene_names)
+rna.f.enr <- read_tsv( synapser::synGet('syn47728345')$path, col_types = cols() )
+rna.m.de <- read_csv( synapser::synGet('syn39990047')$path, col_types = cols() ) %>% rename(gene = gene_names)
+rna.m.enr <- read_tsv( synapser::synGet('syn47728065')$path, col_types = cols() )
 
-domains <- biodom %>% pull(Biodomain) %>% unique() %>% sort() %>% .[!is.na(.)]
-
-# enriched biodomain terms
-enr.bd <- read_csv(synGet('syn45824995')$path, col_types = cols()) %>% 
-  mutate(leadingEdge_genes = str_split(leadingEdge_genes, '\\|'))
+# ROSMAP proteomic PT
+prot.f.de <- read_csv( synapser::synGet('syn40616521')$path, col_types = cols() ) %>% rename(gene = gene_short_name)
+prot.f.enr <- read_csv( synapser::synGet('syn50881293')$path, col_types = cols() )
+prot.m.de <- read_csv( synapser::synGet('syn40621972')$path, col_types = cols() ) %>% rename(gene = gene_short_name)
+prot.m.enr <- read_csv( synapser::synGet('syn50881295')$path, col_types = cols() )
 
 # base network
 net <- igraph::read_graph(synGet('syn51110930')$path, format = 'graphml') 
@@ -61,7 +56,7 @@ net <- igraph::read_graph(synGet('syn51110930')$path, format = 'graphml')
 # read arguments ----------------------------------------------------------
 
 # arguments
-# 1. biodomain index: 1..19
+# 1. pseudotime state: 2..7
 # 2. directed
 # 3. node filter
 # 4. edge filter
@@ -73,7 +68,8 @@ args <- commandArgs(trailingOnly = TRUE)
 
 cat('\narguments:\n',args, '\n')
 
-bd.idx <- args[ which( grepl('[0-9]{1,2}', args) ) ] %>% as.numeric()
+# bd.idx <- args[ which( grepl('[0-9]{1}', args) ) ] %>% as.numeric()
+pt.state <- args[ which( grepl('early|mid|late',args) ) ]
 directed <- any( grepl('dir', args) )
 filt_nodes <- any( grepl('node', args) )
 filt_edges <- any( grepl('edge', args) )
@@ -82,17 +78,17 @@ filt_cellType <- any( grepl('Exc|Inh|Astro|Micro', args) )
 if(filt_cellType){ cellType <- args[ which( grepl('Exc|Inh|Astro|Micro', args) ) ] }
 
 # Specify which biodomain to trace
-dom <- domains[bd.idx]
-cat('\n\nBiodomain NW to trace: #', bd.idx, ', ', dom, '\n')
+cat('\n\nPseudotime state to trace: #', pt.state, '\n')
 cat('Trace directed edges?: ', directed, '\n')
 cat('Filter nodes for brain expression?: ', filt_nodes, '\n')
 cat('Filter edges for PMID evidence?: ', filt_edges, '\n')
-cat('Filter nodes for expression in certain cells?: ', filt_cellType, ', ', cellType)
+cat('Filter nodes for expression in certain cells?: ', filt_cellType)
+if(filt_cellType){cat('\n','Which cells?: ', cellType)}
 # cat('Skip pathway tracing and only run wKDA?: ', noTrace, '\n\n')
 
-net_filename = dom %>% str_replace_all(.,' ','_')
-if( !(dir.exists( paste0(here::here(), '/results/',net_filename) )) ){
-  dir.create( paste0(here::here(), '/results/',net_filename) )
+net_filename = paste0('prot_',pt.state)
+if( !(dir.exists( paste0(here::here(), '/results/pseudotime/',net_filename) )) ){
+  dir.create( paste0(here::here(), '/results/pseudotime/',net_filename) )
 }
 
 # filter base network -----------------------------------------------------
@@ -155,18 +151,28 @@ cat( 'Base network filtered.', '\n')
 
 # gene list to trace ------------------------------------------------------
 
-cat('\n','Tracing paths for leading edges from the <<', dom, '>> biological domain \n')
+cat('\n','Tracing paths for DEGs from the <<', pt.state, '>> pseudotemporal state \n')
 
 # pull gene list from leading edge genes
-input.gene.list <- enr.bd %>% 
-  filter(
-    Biodomain == dom,
-    padj < 0.01,
-    NES > 1.7
-  ) %>% 
-  pull(leadingEdge_genes) %>% 
-  unlist() %>% 
-  unique()
+input.gene.list <- bind_rows(prot.f.de %>% mutate(s = 'f'), prot.m.de %>% mutate(s = 'm')) %>% 
+  pivot_wider(id_cols = c(gene_names, gene, state), 
+              values_from = c(pvalue, effect), 
+              names_from = s) %>% 
+  rowwise() %>% 
+  mutate(sig = case_when( 
+    (pvalue_f <= 0.01 & pvalue_m > 0.01) ~ 'f_only',
+    (pvalue_m <= 0.01 & pvalue_f > 0.01) ~ 'm_only',
+    (pvalue_f > 0.01 & pvalue_m > 0.01) ~ 'neither',
+    (pvalue_f <= 0.01 & pvalue_m <= 0.01) ~ 'both'),
+    mn = mean(-log10(pvalue_f), -log10(pvalue_m), na.rm = T)) %>% 
+  filter (sig == 'both', effect_f/effect_m > 0 ) %>% 
+  mutate( state = case_when(
+    state %in% c(2,3,4) ~ 'early', 
+    state %in% c(5,6) ~ 'mid',
+    state %in% c(7) ~ 'late',
+    T ~ as.character(state)) ) %>% 
+  filter( state == pt.state ) %>% 
+  pull(gene)
 
 le.genes <- input.gene.list
 
@@ -180,7 +186,7 @@ if( length(setdiff( input.gene.list, names(V(nw)))) > 0 ){
     )
 }
 
-cat('Number of leading edge genes to trace: ', 
+cat('Number of genes to trace: ', 
     length(input.gene.list), ' / ', length(le.genes),
     ' (', length(input.gene.list)/length(le.genes)*100, '%)',
     ' \n')
@@ -211,53 +217,55 @@ trace.nw <- igraph::induced_subgraph(
   v=igraph::V(nw)[ names(igraph::V(nw)) %in% trace_filt ]
 )
 
-# Filter NW obj for traced nodes **annotated to biodomain**
-bd.genes <- biodom %>% filter(Biodomain == dom) %>% 
-  pull(symbol) %>% unlist() %>% unique() %>% .[!is.na(.)]
-
-trace_bd_filt <- unlist(trace) %>% intersect(bd.genes,.)
-
-trace.nw.bdFilt <- igraph::induced_subgraph(
-  nw, 
-  v=igraph::V(nw)[ names(igraph::V(nw)) %in% trace_bd_filt ]
-)
+# # Filter NW obj for traced nodes **annotated to biodomain**
+# bd.genes <- biodom %>% filter(Biodomain == dom) %>% 
+#   pull(symbol) %>% unlist() %>% unique() %>% .[!is.na(.)]
+# 
+# trace_bd_filt <- unlist(trace) %>% intersect(bd.genes,.)
+# 
+# trace.nw.bdFilt <- igraph::induced_subgraph(
+#   nw, 
+#   v=igraph::V(nw)[ names(igraph::V(nw)) %in% trace_bd_filt ]
+# )
 
 # save NW trace and filtered NW
 igraph::write_graph(
   trace.nw,
-  paste0( here::here(), '/results/',net_filename,'/',
+  paste0( here::here(), '/results/pseudotime/',net_filename,'/',
           net_filename, directionality, filt,'.graphml'),
   format = "graphml"
 )
 
-igraph::write_graph(
-  trace.nw.bdFilt,
-  paste0( here::here(), '/results/',net_filename,'/',
-          'bdFiltered_', net_filename, directionality, filt , '.graphml'),
-  format = "graphml"
-)
+# igraph::write_graph(
+#   trace.nw.bdFilt,
+#   paste0( here::here(), '/results/',net_filename,'/',
+#           'bdFiltered_', net_filename, directionality, filt , '.graphml'),
+#   format = "graphml"
+# )
 
 ##
 # Remove redundant edges
+combo = list( 
+  interaction = 'concat',
+  edge = 'random',
+  occurrance = 'concat',
+  n_edge = 'max',
+  n_edge_types = 'max',
+  n_edge_evidence = 'max',
+  n_source = 'max',
+  sources = 'concat',
+  n_evidence = 'sum',
+  evidence_pmid = 'concat',
+  n_pathways = 'max',
+  pathway_names = 'concat',
+  directed = 'max'
+)
+
 nw.simple <- igraph::simplify(
-  trace.nw.bdFilt,
+  trace.nw,
   remove.multiple = TRUE,
   remove.loops = FALSE,
-  edge.attr.comb = list( 
-    interaction = 'concat',
-    edge = 'random',
-    occurrance = 'concat',
-    n_edge = 'max',
-    n_edge_types = 'max',
-    n_edge_evidence = 'max',
-    n_source = 'max',
-    sources = 'concat',
-    n_evidence = 'sum',
-    evidence_pmid = 'concat',
-    n_pathways = 'max',
-    pathway_names = 'concat',
-    directed = 'max'
-  )
+  edge.attr.comb = combo
 )
 
 cat('\n','Trace complete and networks saved. \n')
@@ -269,46 +277,41 @@ cat('\n\nGenerating plots...\n')
 
 # Network Stats
 nw.stats <- tibble(  
-  network = c('full','pre-trace','traced','biodom_filtered','simplified'),
+  network = c('full','pre-trace','traced','simplified'),
   n_nodes = c( 
     net %>% V %>% length,
     nw %>% V %>% length,
     trace.nw %>% V %>% length,
-    trace.nw.bdFilt %>% V %>% length,
     nw.simple %>% V %>% length
     ),
   n_edges = c(
     net %>% E %>% length,
     nw %>% E %>% length,
     trace.nw %>% E %>% length,
-    trace.nw.bdFilt %>% E %>% length,
     nw.simple %>% E %>% length
     ),
   avg_path_length = c(
     net %>% average.path.length, 
     nw %>% average.path.length, 
     trace.nw %>% average.path.length, 
-    trace.nw.bdFilt %>% average.path.length, 
     nw.simple %>% average.path.length
     ),
   assortativity_coef = c(
     net %>% assortativity(., types1 = V(.)),
     nw %>% assortativity(., types1 = V(.)),
     trace.nw %>% assortativity(., types1 = V(.)),
-    trace.nw.bdFilt %>% assortativity(., types1 = V(.)),
     nw.simple %>% assortativity(., types1 = V(.))
     ),
   connected_components = c(
     net %>% no.clusters, 
     nw %>% no.clusters,
     trace.nw %>% no.clusters, 
-    trace.nw.bdFilt %>% no.clusters, 
     nw.simple %>% no.clusters
     )
 )
 
 write_csv(nw.stats,
-          paste0( here::here(), '/results/',net_filename,'/',
+          paste0( here::here(), '/results/pseudotime/',net_filename,'/',
                   net_filename, directionality, filt, '_netStats.csv' )
           )
 
@@ -323,7 +326,6 @@ nw.stats %>%
          , network = factor(network, levels = c('full',
                                                 'pre-trace',
                                                 'traced',
-                                                'biodom_filtered',
                                                 'simplified'))) %>% 
   ggplot(aes(network, val)) +
   geom_bar(stat = 'identity', position = 'dodge')+
@@ -333,7 +335,7 @@ nw.stats %>%
   facet_wrap(~properties, scales = 'free_y', ncol = 2)
 
 ggsave(
-  paste0( here::here(), '/results/',net_filename,'/',
+  paste0( here::here(), '/results/pseudotime/',net_filename,'/',
           net_filename, directionality, filt, '_netStats.pdf' )
 )
 

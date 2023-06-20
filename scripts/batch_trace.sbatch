@@ -12,7 +12,7 @@ working="/projects/carter-lab/caryg/network_tracing"
 cd $working
 
 ## exampl slurm batch job call:
-#for i in {1..19}; do sbatch scripts/batch_trace.sbatch $i dir node edge; done
+#for i in results/biodomain/*/queryList*; do sbatch scripts/batch_trace.sbatch $i dir node edge; done
 
 ## wait for trace to complete
 trace_jobid=`sbatch --job-name=pathtrace -o ./logs/trace-%j.log --time=72:00:00 --cpus-per-task=12 --mem=16GB ./scripts/pathtrace.sbatch $1 $2 $3 $4 | grep -o "[0-9]*"`

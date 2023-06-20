@@ -430,21 +430,6 @@ The Biodomains with traced NW analyzed by wKDA include:
 
 Explore the effects of NW filters on traces & KDs for these sets  
 
-# Biodom NW analyses
-## APP Metabolism
-## Tau Homeostasis  
-## Immune Response  
-## Mitochondrial Metabolism
-# Lipid Metabolism 
-
-
-
-
-
-
-
-
-
 # Session
 ```{r}
 sessionInfo()

@@ -14,6 +14,7 @@ output:
     toc_float: true
 ---
 
+
 ```{r setup}
 library(synapser)
 # library(paxtoolsr)
@@ -24,13 +25,14 @@ library(igraph)
 library(tidygraph)
 library(tidyverse)
 
-source(paste0(here::here(),'/../biodom_tally.R'))
-source(paste0(here::here(),'/../biodom_enr.R'))
-source(paste0(here::here(),'/../biodom_enr_plots.R'))
+# source(paste0(here::here(),'/../biodom_tally.R'))
+# source(paste0(here::here(),'/../biodom_enr.R'))
+# source(paste0(here::here(),'/../biodom_enr_plots.R'))
 
 theme_set(theme_bw())
 ```
 
+# Gather data
 Grab relevant data from synapse, including:  
 1) Target Risk Scores ([syn25575156](https://www.synapse.org/#!Synapse:syn25575156){target="_blank"}) and Omics Scores ([syn22758536](https://www.synapse.org/#!Synapse:syn22758536){target="_blank"})  
 2) Biodomain Definitions ([syn25428992](https://www.synapse.org/#!Synapse:syn25428992){target="_blank"})  
@@ -38,13 +40,15 @@ Grab relevant data from synapse, including:
 4) Human Protein Atlas tissue immunohistochemistry micro array data ([syn51074598](https://www.synapse.org/#!Synapse:syn51074598){target="_blank"})  
 5) RNA Brain GTEx ([syn51074639](https://www.synapse.org/#!Synapse:syn51074639){target="_blank"})  
 6) AMP-AD cohort pairwise partial correlations ([ROSMAP](https://www.synapse.org/#!Synapse:syn51061790){target="_blank"}, [Mayo](https://www.synapse.org/#!Synapse:syn51061614){target="_blank"}, [MSBB](https://www.synapse.org/#!Synapse:syn51061324){target="_blank"}); these are quite large! (> 6 GB), wait to load until performing this analysis  
-7) SEA-AD single cell data ([syn51080312](https://www.synapse.org/#!Synapse:syn51080312){target="_blank"}); this is a large file (> 2 GB), wait to load until performing this analysis  
+7) SEA-AD single cell data ([syn51441105](https://www.synapse.org/#!Synapse:syn51441105){target="_blank"})  
 ```{r message=FALSE, warning=FALSE}
 synLogin()
 
 # target risk scores
-scores <- read_csv(synTableQuery('select * from syn25575156', includeRowIdAndRowVersion = F)$filepath)
-omics <- read_csv(synTableQuery('select * from syn22758536',  includeRowIdAndRowVersion = F)$filepath)
+scores <- read_csv(synTableQuery('select * from syn25575156', 
+                                 includeRowIdAndRowVersion = F)$filepath)
+omics <- read_csv(synTableQuery('select * from syn22758536', 
+                                includeRowIdAndRowVersion = F)$filepath)
 
 # biological domain annotations
 biodom <- full_join(
@@ -62,9 +66,12 @@ net <- igraph::read_graph(synGet('syn51080932')$path, format = 'graphml')
 # Human protein atlas info
 tissue.array <- read_csv(synGet('syn51074598')$path)
 brain.gtex <- read_csv(synGet('syn51074639')$path)
+
+# single cell
+seaad <- read_csv(synGet('syn51197803')$path, guess_max = 2e5)
+seaad.broad <- read_csv(synGet('syn51441105')$path, guess_max = 2e5)
 ```
 
-# Pathway Commons Network
 
 Extract the core NW tables
 ```{r message=FALSE}
@@ -79,112 +86,7 @@ e.attr <- tibble( ea = edge.attributes(net) ) %>%
   rename_with(., ~names(edge.attributes(net)), everything())
 ```
 
-
-Specify the directed-edge types to filter the Pathway Commons graph  
-```{r}
-directed_edge_types = c("catalysis-precedes",
-                        "controls-expression-of",
-                        "controls-phosphorylation-of",
-                        "controls-state-change-of",
-                        "controls-transport-of"
-                        )
-
-# dir.net <- graph_from_data_frame(d = net.tbl %>% filter(interaction %in% directed_edge_types), directed = T)
-```
-
-How many edges from each source?  
-```{r warning=FALSE}
-bind_cols(
-    sources = str_split(net.tbl$sources,',') %>% unlist %>% unique, 
-    n_edge = map_dbl( 
-        str_split(net.tbl$sources,',') %>% unlist %>% unique, 
-        ~ net.tbl %>% filter(grepl(.x, sources)) %>% nrow() ),
-    any_directed = map_lgl(
-        str_split(net.tbl$sources,',') %>% unlist %>% unique, 
-        ~ net.tbl %>% 
-            mutate(directed = if_else(interaction %in% directed_edge_types, 'dir','undir') ) %>% 
-            filter(grepl(.x, sources)) %>% pull(directed) %>% any(. == 'dir')
-    )
-) %>% 
-  mutate(any_directed = if_else(is.na(any_directed), FALSE, TRUE),
-         any_directed = factor(any_directed, levels=c('TRUE','FALSE'))) %>%
-  arrange(desc(n_edge)) %>% mutate(sources = fct_relevel(sources, sources)) %>%
-  ggplot(aes(sources, n_edge)) + geom_bar(stat = 'identity', aes(fill = any_directed)) +
-  # scale_y_log10()+
-  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1)
-        , legend.position = 'top')
-```
-
-Which edge sources are (generally) well supported?  
-```{r warning=FALSE}
-bind_cols(
-    sources = str_split(net.tbl$sources,',') %>% unlist %>% unique, 
-    n_edge = map_dbl( 
-      str_split(net.tbl$sources,',') %>% unlist %>% unique, 
-      ~ net.tbl %>% filter(grepl(.x, sources)) %>% nrow() )
-    , median_evidence_per_edge = map_dbl( 
-      str_split(net.tbl$sources,',') %>% unlist %>% unique, 
-      ~ net.tbl %>% filter(grepl(.x, sources)) %>% pull(n_edge_evidence) %>% median() )
-    , any_directed = map_lgl(
-        str_split(net.tbl$sources,',') %>% unlist %>% unique, 
-        ~ net.tbl %>% 
-            mutate(directed = if_else(interaction %in% directed_edge_types, 'dir','undir') ) %>% 
-            filter(grepl(.x, sources)) %>% pull(directed) %>% any(. == 'dir') )
-) %>% 
-  mutate(any_directed = if_else(is.na(any_directed), FALSE, TRUE),
-         any_directed = factor(any_directed, levels=c('TRUE','FALSE'))) %>%
-  arrange(desc(n_edge)) %>% mutate(sources = fct_relevel(sources, sources)) %>% 
-  ggplot(aes(n_edge, median_evidence_per_edge)) +
-  geom_point( aes(color = any_directed )) + 
-  scale_x_log10()+ 
-  theme(legend.position = 'top')+
-  ggrepel::geom_label_repel(aes(label = sources), size = 3)
-  # theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1)) 
-```
-
-Distribution of evidence support for edges
-```{r}
-net.tbl %>% 
-  mutate(directed = if_else(interaction %in% directed_edge_types, 'dir','undir') ) %>% 
-  ggplot(aes(n_edge_evidence))+
-  stat_ecdf(geom = 'line', aes(color = directed))+
-  # geom_density(aes(fill = directed))+
-  # geom_histogram(aes(fill = directed), position = position_dodge())+
-  # scale_y_log10()+
-  scale_x_log10()+
-  geom_vline(xintercept = 2, lty = 2, lwd = .5)+
-  labs(y = 'fraction of edges')
-```
-
-Distribution of evidence support for edges
-```{r}
-net.tbl %>% 
-  mutate(directed = if_else(interaction %in% directed_edge_types, 'dir','undir') ) %>% 
-  ggplot(aes(n_source))+
-  stat_ecdf(geom = 'line', aes(color = directed))+
-  # geom_density(aes(fill = directed))+
-  # geom_histogram(aes(fill = directed), position = position_dodge())+
-  # scale_y_log10()+
-  scale_x_log10()+
-  geom_vline(xintercept = 2, lty = 2, lwd = .5)+
-  labs(y = 'fraction of edges')
-```
-
-Distribution of evidence support for edges
-```{r}
-net.tbl %>% 
-  # mutate(directed = if_else(interaction %in% directed_edge_types, 'dir','undir') ) %>% 
-  ggplot(aes( n_edge_types, n_edge_evidence ))+
-  geom_point()+
-  geom_smooth(method = 'lm')+
-  scale_y_log10()+
-  # scale_x_log10()+
-  # geom_vline(xintercept = 2, lty = 2, lwd = .5)+
-  labs()
-```
-
-
-# Human Protein Atlas 
+# NODE: Human Protein Atlas 
 
 Specify brain tissue types
 ```{r}
@@ -267,10 +169,1148 @@ brain.gtex %>%
   theme(legend.position = 'top')
 ```
 
-# SEA-AD single cell data
+# NODE: SEA-AD single cell data
+
+## subclass
+### both dimensions
+
 ```{r}
-seaad <- read_csv(synGet('syn51080312')$path, guess_max = 2e5)
+t = .9
+
+tmp = seaad.broad %>% 
+
+  # filter(gene %in% not.brain) %>% 
+  # mutate(hpa = 'not') %>% 
+
+  mutate(
+      hpa = case_when(
+          gene %in% brain.genes ~ 'brain',
+          gene %in% not.brain ~ 'not',
+          gene %in% tad.deg ~ 'deg',
+          T ~ 'other'
+      )
+  ) %>%
+
+  group_by(cellType, hpa) %>% 
+  summarise( 
+    exp = quantile(upperQ_exp, t), 
+    fxn = quantile(fxn_exp, t)
+    ) 
+
+# bind_rows(
+#     tmp, 
+#     tmp %>% filter(hpa == 'not') %>% mutate(exp = exp + .142, fxn = fxn + .142, hpa = 'new')
+#   ) %>% 
+tmp %>% 
+  ggplot(aes(fxn, exp, group = hpa))+
+  geom_smooth(method = 'lm', color = 'grey20', lwd = .5, lty = 2)+
+  # geom_abline(intercept = 1.5294, slope = -2.562569)+
+  geom_abline(intercept = 2.3, slope = -2.5)+
+  annotate(geom = 'text', x = .65, y = 0, label = 'y = -2.5x + 2.3', hjust = 0)+
+  geom_point(aes(color = cellType, shape = hpa), size = 2, alpha = .5)+
+  labs(y = 'quantile expression', x = 'quantile fraction expressing',
+       subtitle = paste0('plotting quantile: ', t))
+
 ```
+
+
+```{r}
+t = .9
+
+seaad.broad %>% 
+  
+  # filter(gene %in% not.brain) %>% 
+  # mutate(hpa = 'not') %>% 
+
+  mutate(
+      hpa = case_when(
+          gene %in% brain.genes ~ 'brain',
+          gene %in% not.brain ~ 'not',
+          gene %in% tad.deg ~ 'deg',
+          T ~ 'other'
+      )
+  ) %>%
+  filter(hpa == 'not') %>%
+
+  group_by(cellType, hpa) %>%
+  summarise( exp = quantile(upperQ_exp, t), 
+             fxn = quantile(fxn_exp, t)
+             ) %>% 
+  lm(exp~fxn, data = .) %>% 
+  broom::tidy()
+```
+
+```{r}
+x = map_dfr(
+    seq(1.5,3.5,.01),
+    ~{
+        seaad.broad %>% 
+            filter( upperQ_exp >= -2.5 * fxn_exp + .x) %>% 
+            summarise(
+                int = .x,
+                n.brain = length(intersect(gene, brain.genes )),
+                n.not = length(intersect(gene,not.brain)),
+                n.deg = length(intersect(gene,tad.deg)),
+                n.other = length(unique(setdiff(gene, union(union(brain.genes, tad.deg), not.brain)))),
+                diff.b = (n.brain - n.not),
+                pct.b = 100*(diff.b/n.brain),
+                diff.d = n.deg - n.not,
+                pct.d = 100*(diff.d/n.brain)
+            )
+    }
+) %>% 
+  arrange(desc(diff.b), desc(pct.d));
+
+qplot(x$int, x$diff.b, geom = 'line')
+
+DT::datatable(x)
+```
+
+```{r}
+t = .9
+
+thresh = seaad.broad %>% 
+  filter(gene %in% not.brain) %>%
+  group_by(broad, cellType) %>%
+  summarise( 
+    exp1 = quantile(upperQ_exp, t),
+    fxn1 = quantile(fxn_exp, t)
+  ) %>% 
+  mutate(
+    exp = exp1+.142,
+    fxn = fxn1+.142,
+    hpa = 'new.dat'
+  ) 
+
+seaad.broad %>% 
+
+  mutate(
+    hpa = case_when(
+        gene %in% brain.genes ~ 'brain',
+        gene %in% not.brain ~ 'not',
+        gene %in% tad.deg ~ 'deg',
+        T ~ 'other')
+      ) %>% 
+  ggplot(aes(fxn_exp, upperQ_exp, group = hpa))+
+  geom_abline(intercept = 2.3, slope = -2.5)+
+  # annotate(geom = 'text', x = .65, y = 0, label = 'y = -2.5x + 2.5', hjust = 0)+
+  geom_point(data = thresh, aes(x = fxn, y = exp), size = 2, alpha = .5)+
+  geom_smooth(method = 'lm', aes(color = hpa), lwd = .5, lty = 2)+
+  labs(y = 'expression', x = 'fraction expressing'
+       #, subtitle = paste0('plotting quantile: ', t)
+       )+
+  facet_wrap(~broad, scales = 'free')
+
+```
+```{r}
+t = .9
+
+thresh = seaad.broad %>% 
+  filter(gene %in% not.brain) %>%
+  group_by(broad, cellType) %>%
+  summarise( 
+    exp1 = quantile(upperQ_exp, t),
+    fxn1 = quantile(fxn_exp, t)
+  ) %>% 
+  mutate(
+    exp = exp1+.142,
+    fxn = fxn1+.142,
+    hpa = 'new.dat'
+  ) 
+
+seaad.broad %>% 
+  mutate(
+    hpa = case_when(
+        gene %in% brain.genes ~ 'brain',
+        gene %in% not.brain ~ 'not',
+        gene %in% tad.deg ~ 'deg',
+        T ~ 'other')
+      ) %>% 
+
+  # group_by(cellType) %>%
+  # filter(
+  #   fxn_exp >= thresh$fxn[ which(thresh$cellType == cellType) ] %>% unique(),
+  #   upperQ_exp >= thresh$exp[ which(thresh$cellType == cellType) ] %>% unique(),
+  #   .preserve = T
+  # ) %>%
+  # ungroup() %>%
+  
+  filter( upperQ_exp >= -2.5 * fxn_exp + 2.3) %>%
+
+  ggplot(aes(fxn_exp, upperQ_exp, group = hpa))+
+  geom_abline(intercept = 2.3, slope = -2.5)+
+  # annotate(geom = 'text', x = .65, y = 0, label = 'y = -2.5x + 2.5', hjust = 0)+
+  geom_point(data = thresh, aes(x = fxn, y = exp), size = 2, alpha = .5)+
+  geom_smooth(method = 'lm', aes(color = hpa), lwd = .5, lty = 2)+
+  labs(y = 'expression', x = 'fraction expressing'
+       #, subtitle = paste0('plotting quantile: ', t)
+       )+
+  facet_wrap(~broad, scales = 'free')
+
+```
+
+```{r fig.width=8, fig.height=6}
+seaad.broad %>% 
+  ggplot(aes(upperQ_exp, fxn_exp))+ 
+  geom_bin2d(aes(fill = ..count.. ))+
+  viridis::scale_fill_viridis(trans = 'log10', option = 'A')+
+  ggtitle('no filter')+
+  facet_wrap(~broad)
+```
+
+```{r fig.width=8, fig.height=6}
+thresh = seaad.broad %>% 
+  filter(gene %in% not.brain) %>%
+  group_by(broad, cellType) %>%
+  summarise( 
+    exp1 = quantile(upperQ_exp, t),
+    fxn1 = quantile(fxn_exp, t)
+  ) %>% 
+  mutate(
+    exp = exp1+.142,
+    fxn = fxn1+.142,
+    hpa = 'new.dat'
+  ) 
+
+seaad.broad %>% 
+  mutate(
+    hpa = case_when(
+        gene %in% brain.genes ~ 'brain',
+        gene %in% tad.deg ~ 'deg',
+        gene %in% not.brain ~ 'not',
+        T ~ 'other')
+      ) %>% 
+  filter(!is.na(hpa)) %>%     
+
+  # group_by(cellType) %>%
+  # filter(
+  #   fxn_exp >= thresh$fxn[ which(thresh$cellType == cellType) ] %>% unique(),
+  #   upperQ_exp >= thresh$exp[ which(thresh$cellType == cellType) ] %>% unique(),
+  #   .preserve = T
+  # ) %>%
+  # ungroup() %>%
+
+  filter( upperQ_exp >= -2.5 * fxn_exp + 2.3) %>%
+
+  # group_by(cellType, hpa) %>% 
+  # mutate( exp = quantile(upperQ_exp, .9), 
+  #         fxn = quantile(fxn_exp, .9)
+  #         ) %>% 
+  # group_by(cellType) %>%
+  # filter(  ) %>%
+  # ungroup() %>% 
+  
+  mutate(
+    n = case_when(
+      gene %in% brain.genes ~ length(intersect(gene, brain.genes)),
+      gene %in% tad.deg ~ length(intersect(gene,tad.deg)),
+      gene %in% not.brain ~ length(intersect(gene,not.brain)),
+      T ~ length(unique(setdiff(gene, union(union(brain.genes, tad.deg), not.brain))))
+      )) %>%
+  ggplot(aes(upperQ_exp, fxn_exp))+ 
+  geom_bin2d(aes(fill = ..count.. ))+
+  viridis::scale_fill_viridis(trans = 'log10', option = 'A')+
+  facet_wrap(~broad)
+```
+
+```{r, fig.width=8, fig.height=8}
+
+seaad.broad %>% 
+  mutate(
+    hpa = case_when(
+      gene %in% brain.genes ~ 'brain.genes',
+      gene %in% tad.deg ~ 'tad.deg',
+      gene %in% not.brain ~ 'not.brain',
+      T ~ 'other')
+  ) %>% 
+  filter(!is.na(hpa)) %>% 
+  group_by(hpa) %>% 
+  mutate(
+    n = length(unique(gene)),
+    hpa1 = paste0(hpa, ', ', n)
+    ) %>% 
+  ggplot(aes(upperQ_exp, fxn_exp))+ 
+  geom_bin2d(aes(fill = ..count.. ))+
+  viridis::scale_fill_viridis(trans = 'log10', option = 'A')+
+  ggtitle('no filter')+
+  facet_grid(broad~hpa1)
+ 
+```
+
+```{r, fig.width=8, fig.height=8}
+
+thresh = seaad.broad %>% 
+  filter(gene %in% not.brain) %>%
+  group_by(broad, cellType) %>%
+  summarise( 
+    exp1 = quantile(upperQ_exp, t),
+    fxn1 = quantile(fxn_exp, t)
+  ) %>% 
+  mutate(
+    exp = exp1+.142,
+    fxn = fxn1+.142,
+    hpa = 'new.dat'
+  ) 
+
+seaad.broad %>% 
+  mutate(
+    hpa = case_when(
+        gene %in% brain.genes ~ 'brain',
+        gene %in% tad.deg ~ 'tad.deg',
+        gene %in% not.brain ~ 'not.brain',
+        T ~ 'other')
+      ) %>% 
+  filter(!is.na(hpa)) %>%     
+
+  # group_by(cellType) %>%
+  # filter(
+  #   fxn_exp >= thresh$fxn[ which(thresh$cellType == cellType) ] %>% unique(),
+  #   upperQ_exp >= thresh$exp[ which(thresh$cellType == cellType) ] %>% unique(),
+  #   .preserve = T
+  # ) %>%
+  # ungroup() %>%
+  
+  filter( upperQ_exp >= -2.5 * fxn_exp + 2.3) %>%
+  
+  # filter( upperQ_exp >= 2 | (upperQ_exp >= 1.33 & fxn_exp >= 0.2) ) %>%
+
+  # group_by(cellType, hpa) %>%
+  # mutate(top_exp = quantile(upperQ_exp, 0.75),
+  #        top_fxn = quantile(fxn_exp, 0.95)) %>%
+  # group_by(cellType) %>%
+  # filter( upperQ_exp > unique(top_exp[hpa == 'not.brain']) ,
+  #         fxn_exp > unique(top_fxn[hpa == 'not.brain']) ) %>%
+  # ungroup() %>%
+  
+  group_by(hpa) %>% 
+  mutate(
+    n = length(unique(gene)),
+    hpa1 = paste0(hpa, ', ', n)
+    ) %>% 
+  ggplot(aes(upperQ_exp, fxn_exp))+ 
+  geom_bin2d(aes(fill = ..count.. ))+
+  viridis::scale_fill_viridis(trans = 'log10', option = 'A')+
+  ggtitle('filtered')+
+  facet_grid(broad~hpa1)
+ 
+```
+
+
+### fxn expressed
+```{r}
+# also "brain genes":
+# scores %>% filter(isScored_omics == 'Y', OmicsScore > 0) %>% pull(GeneName) %>% unique()
+
+seaad.broad %>% 
+  # filter(is.na(group)) %>% 
+  mutate(
+    hpa = case_when(
+      gene %in% brain.genes ~ paste0('HPA brain (n = ', length(intersect(gene, brain.genes)),' genes)'),
+      gene %in% tad.deg ~ paste0('TAD DEG (n = ', length(intersect(gene,tad.deg)),' genes)'),
+      gene %in% not.brain ~ paste0('HPA not brain (n = ', length(intersect(gene,not.brain)),' genes)'),
+      T ~ paste0('other (n = ', length(unique(setdiff(gene, union(union(brain.genes, tad.deg), not.brain)))) ,' genes)')
+      )
+  ) %>% 
+  filter(!is.na(hpa)) %>% 
+  ggplot(aes( fxn_exp, fill = hpa))+
+  geom_density(aes(color = hpa), alpha = .1)+
+  # geom_histogram(position = 'dodge')+
+  # scale_y_log10()+
+  scale_fill_discrete('')+scale_color_discrete('')+
+  guides(fill = guide_legend(nrow=2))+
+  ggforce::facet_zoom(xlim = c(0,.25), ylim = c(0,5))+
+  theme(legend.position = 'top')
+```
+
+```{r fig.width=6, fig.height=13}
+# seaad.broad %>% group_by(cellType) %>% summarise(mn = median(fraction_expressed))
+
+seaad.broad %>% 
+  mutate(
+    hpa = case_when(
+      gene %in% brain.genes ~ paste0('HPA brain (n = ', length(intersect(gene, brain.genes)),' genes)'),
+      gene %in% tad.deg ~ paste0('TAD DEG (n = ', length(intersect(gene,tad.deg)),' genes)'),
+      gene %in% not.brain ~ paste0('HPA not brain (n = ', length(intersect(gene,not.brain)),' genes)'),
+      T ~ paste0('other (n = ', length(unique(setdiff(gene, union(union(brain.genes, tad.deg), not.brain)))) ,' genes)')
+      )
+  ) %>% 
+  group_by(cellType, hpa) %>% 
+  mutate(top_exp = quantile(upperQ_exp, 0.75),
+         top_fxn = quantile(fxn_exp, 0.75)) %>% 
+  ggplot(., aes(fxn_exp, cellType, fill = hpa)) + 
+  geom_violin(scale = 'width', draw_quantiles = c(.5)) +
+  geom_point(aes(x = top_fxn, color = hpa))+
+  # stat_summary(fun = function(x) quantile(x,0.5), geom="point", size=2, color="red", position = 'dodge')+
+  # ggforce::facet_zoom(xlim = c(0,0.08), horizontal = F)
+  coord_cartesian(xlim = c(0,0.25))
+
+```
+
+```{r}
+# also "brain genes":
+# scores %>% filter(isScored_omics == 'Y', OmicsScore > 0) %>% pull(GeneName) %>% unique()
+
+seaad.broad %>% 
+  # filter(is.na(group)) %>% 
+  mutate(
+    hpa = case_when(
+      gene %in% brain.genes ~ paste0('HPA brain (n = ', length(intersect(gene, brain.genes)),' genes)'),
+      gene %in% tad.deg ~ paste0('TAD DEG (n = ', length(intersect(gene,tad.deg)),' genes)'),
+      gene %in% not.brain ~ paste0('HPA not brain (n = ', length(intersect(gene,not.brain)),' genes)'),
+      T ~ paste0('other (n = ', length(unique(setdiff(gene, union(union(brain.genes, tad.deg), not.brain)))) ,' genes)')
+      )
+  ) %>% 
+  filter(!is.na(hpa)) %>% 
+  ggplot(aes( fxn_exp, fill = hpa))+
+  # geom_density(aes(color = hpa), alpha = .1)+
+  geom_histogram(position = 'dodge')+
+  # scale_y_log10()+
+  scale_fill_discrete('')+scale_color_discrete('')+
+  guides(fill = guide_legend(nrow=2))+
+  ggforce::facet_zoom(xlim = c(0,.25), ylim = c(0,1e5))+
+  theme(legend.position = 'top')
+```
+
+```{r}
+# also "brain genes":
+# scores %>% filter(isScored_omics == 'Y', OmicsScore > 0) %>% pull(GeneName) %>% unique()
+
+seaad.broad %>% 
+  # filter( upperQ_exp >= 2 | (upperQ_exp >= 1.33 & fxn_exp >= 0.2) ) %>%
+  mutate(
+    hpa = case_when(
+      gene %in% brain.genes ~ 'brain.genes',
+      gene %in% tad.deg ~ 'tad.deg',
+      gene %in% not.brain ~ 'not.brain',
+      T ~ 'other')
+  ) %>% 
+  filter(!is.na(hpa)) %>% 
+
+  # group_by(cellType, hpa) %>% 
+  # mutate(top_exp = quantile(upperQ_exp, 0.75),
+  #        top_fxn = quantile(fxn_exp, 0.95)) %>% 
+  # group_by(cellType) %>%  
+  # filter( upperQ_exp > unique(top_exp[hpa == 'not.brain']) ,
+  #         fxn_exp > unique(top_fxn[hpa == 'not.brain']) ) %>% 
+  # ungroup() %>% 
+  
+  filter( upperQ_exp >= -2.5 * fxn_exp + 2.3) %>%
+  
+  # filter( upperQ_exp >= 2 | (upperQ_exp >= 1.33 & fxn_exp >= 0.2) ) %>%
+
+  group_by(hpa) %>% 
+  mutate(
+    n = length(unique(gene)),
+    hpa1 = paste0(hpa, ', ', n)
+    ) %>% 
+  
+  ggplot(aes( fxn_exp, fill = hpa1))+
+  # geom_density(aes(color = hpa1), alpha = .1)+
+  geom_histogram(position = 'dodge')+
+  # scale_y_log10()+
+  scale_fill_discrete('')+scale_color_discrete('')+
+  guides(fill = guide_legend(nrow=2))+
+  ggforce::facet_zoom(xlim = c(0,.25), ylim = c(0,1e5))+
+  theme(legend.position = 'top')
+```
+
+
+
+```{r}
+# also "brain genes":
+# scores %>% filter(isScored_omics == 'Y', OmicsScore > 0) %>% pull(GeneName) %>% unique()
+
+seaad.broad %>% 
+  # filter( upperQ_exp >= 2 | (upperQ_exp >= 1.33 & fxn_exp >= 0.2) ) %>%
+  mutate(
+    hpa = case_when(
+      gene %in% brain.genes ~ 'brain.genes',
+      gene %in% tad.deg ~ 'tad.deg',
+      gene %in% not.brain ~ 'not.brain',
+      T ~ 'other')
+  ) %>% 
+  filter(!is.na(hpa)) %>% 
+
+  # group_by(cellType, hpa) %>% 
+  # mutate(top_exp = quantile(upperQ_exp, 0.75),
+  #        top_fxn = quantile(fxn_exp, 0.95)) %>% 
+  # group_by(cellType) %>%  
+  # filter( upperQ_exp > unique(top_exp[hpa == 'not.brain']) ,
+  #         fxn_exp > unique(top_fxn[hpa == 'not.brain']) ) %>% 
+  # ungroup() %>% 
+  
+  filter( upperQ_exp >= -2.5 * fxn_exp + 2.3) %>%
+  
+  # filter( upperQ_exp >= 2 | (upperQ_exp >= 1.33 & fxn_exp >= 0.2) ) %>%
+
+  group_by(hpa) %>% 
+  mutate(
+    n = length(unique(gene)),
+    hpa1 = paste0(hpa, ', ', n)
+    ) %>% 
+  
+  ggplot(aes( fxn_exp, color = hpa1))+
+  geom_density( alpha = .1)+
+  # geom_histogram(position = 'dodge')+
+  # scale_y_log10()+
+  geom_vline(xintercept = 0.2, lty = 2)+
+  scale_fill_discrete('')+scale_color_discrete('')+
+  guides(fill = guide_legend(nrow=2))+
+  ggforce::facet_zoom(xlim = c(0,.25), ylim = c(0,1.7))+#
+  theme(legend.position = 'top')
+```
+```{r fig.width=6, fig.height=13}
+# seaad.broad %>% group_by(cellType) %>% summarise(mn = median(fraction_expressed))
+
+seaad.broad %>% 
+  # filter( upperQ_exp >= 2 | (upperQ_exp >= 1.33 & fxn_exp >= 0.2) ) %>%
+  mutate(
+    hpa = case_when(
+      gene %in% brain.genes ~ 'brain.genes',
+      gene %in% tad.deg ~ 'tad.deg',
+      gene %in% not.brain ~ 'not.brain',
+      T ~ 'other')
+  ) %>% 
+  filter(!is.na(hpa)) %>% 
+
+  # group_by(cellType, hpa) %>% 
+  # mutate(top_exp = quantile(upperQ_exp, 0.75),
+  #        top_fxn = quantile(fxn_exp, 0.95)) %>% 
+  # group_by(cellType) %>%  
+  # filter( upperQ_exp > unique(top_exp[hpa == 'not.brain']) ,
+  #         fxn_exp > unique(top_fxn[hpa == 'not.brain']) ) %>% 
+  # ungroup() %>% 
+
+  filter( upperQ_exp >= -2.5 * fxn_exp + 2.3) %>%
+  
+  # filter( upperQ_exp >= 2 | (upperQ_exp >= 1.33 & fxn_exp >= 0.2) ) %>%
+
+  group_by(hpa) %>% 
+  mutate(
+    n = length(unique(gene)),
+    hpa1 = paste0(hpa, ', ', n)
+    ) %>% 
+
+  ggplot(., aes(fxn_exp, cellType, fill = hpa1)) + 
+  geom_violin(scale = 'width', draw_quantiles = c(.5), trim = F) +
+  # geom_point(aes(x = top_fxn, color = hpa))+
+  # stat_summary(fun = function(x) quantile(x,0.5), geom="point", size=2, color="red", position = 'dodge')+
+  # ggforce::facet_zoom(xlim = c(0,0.08), horizontal = F)
+  coord_cartesian(xlim = c(0,1))
+
+```
+
+
+### avg expression
+
+```{r}
+# also "brain genes":
+# scores %>% filter(isScored_omics == 'Y', OmicsScore > 0) %>% pull(GeneName) %>% unique()
+
+seaad.broad %>% 
+  # filter(is.na(group)) %>% 
+  mutate(
+    hpa = case_when(
+      gene %in% brain.genes ~ paste0('HPA brain (n = ', length(intersect(gene, brain.genes)),' genes)'),
+      gene %in% tad.deg ~ paste0('TAD DEG (n = ', length(intersect(gene,tad.deg)),' genes)'),
+      gene %in% not.brain ~ paste0('HPA not brain (n = ', length(intersect(gene,not.brain)),' genes)'),
+      T ~ paste0('other (n = ', length(unique(setdiff(gene, union(union(brain.genes, tad.deg), not.brain)))) ,' genes)')
+      )
+  ) %>% 
+  filter(!is.na(hpa)) %>% 
+  ggplot(aes( (upperQ_exp), fill = hpa))+
+  geom_density(aes(color = hpa), alpha = .1)+
+  # geom_histogram(position = 'dodge')+
+  # scale_y_log10()+
+  scale_fill_discrete('')+scale_color_discrete('')+
+  guides(fill = guide_legend(nrow=2))+
+  ggforce::facet_zoom(xlim = c(0,2), ylim = c(0,1.3) )+
+  theme(legend.position = 'top')
+
+```
+
+```{r fig.width=6, fig.height=13, warning=FALSE}
+# seaad.broad %>% group_by(cellType) %>% summarise(mn = median(fraction_expressed))
+
+seaad.broad %>% 
+  mutate(
+    hpa = case_when(
+      gene %in% brain.genes ~ paste0('HPA brain (n = ', length(intersect(gene, brain.genes)),' genes)'),
+      gene %in% tad.deg ~ paste0('TAD DEG (n = ', length(intersect(gene,tad.deg)),' genes)'),
+      gene %in% not.brain ~ paste0('HPA not brain (n = ', length(intersect(gene,not.brain)),' genes)'),
+      T ~ paste0('other (n = ', length(unique(setdiff(gene, union(union(brain.genes, tad.deg), not.brain)))) ,' genes)')
+      )
+  ) %>% 
+  group_by(cellType, hpa) %>% 
+  mutate(top_exp = quantile(upperQ_exp, 0.75),
+         top_fxn = quantile(fxn_exp, 0.75)) %>% 
+  ggplot(., aes(upperQ_exp, cellType, fill = hpa)) + 
+  geom_violin(scale = 'width', draw_quantiles = c(.5)) +
+  # geom_point(aes(x = top_exp, color = hpa))+
+  # stat_summary(fun = function(x) quantile(x,0.5), geom="point", size=2, color="red", position = 'dodge')+
+  # ggforce::facet_zoom(xlim = c(0,0.08), horizontal = F)
+  coord_cartesian(xlim = c(0,6))
+
+```
+
+
+```{r}
+# also "brain genes":
+# scores %>% filter(isScored_omics == 'Y', OmicsScore > 0) %>% pull(GeneName) %>% unique()
+
+seaad.broad %>% 
+  # filter(is.na(group)) %>% 
+  mutate(
+    hpa = case_when(
+      gene %in% brain.genes ~ paste0('HPA brain (n = ', length(intersect(gene, brain.genes)),' genes)'),
+      gene %in% tad.deg ~ paste0('TAD DEG (n = ', length(intersect(gene,tad.deg)),' genes)'),
+      gene %in% not.brain ~ paste0('HPA not brain (n = ', length(intersect(gene,not.brain)),' genes)'),
+      T ~ paste0('other (n = ', length(unique(setdiff(gene, union(union(brain.genes, tad.deg), not.brain)))) ,' genes)')
+      )
+  ) %>% 
+  # group_by(cellType, hpa) %>% 
+  # mutate(md_exp = quantile(upperQ_exp, 0.5),
+  #        fivepct_exp = quantile(upperQ_exp, 0.95), 
+  #        fivepct_fxn = quantile(fxn_exp, .5)) %>% 
+  filter(!is.na(hpa)) %>% 
+  ggplot(aes( (upperQ_exp), fill = hpa))+
+  # geom_density(aes(color = hpa), alpha = .1)+
+  geom_histogram(position = 'dodge')+
+  # scale_y_log10()+
+  scale_fill_discrete('')+scale_color_discrete('')+
+  guides(fill = guide_legend(nrow=2))+
+  ggforce::facet_zoom(xlim = c(0,2), ylim = c(0,3.5e4) )+
+  theme(legend.position = 'top')
+
+```
+
+```{r}
+# also "brain genes":
+# scores %>% filter(isScored_omics == 'Y', OmicsScore > 0) %>% pull(GeneName) %>% unique()
+
+seaad.broad %>% 
+  # filter( upperQ_exp >= 2 | (upperQ_exp >= 1.33 & fxn_exp >= 0.2) ) %>%
+  mutate(
+    hpa = case_when(
+      gene %in% brain.genes ~ 'brain.genes',
+      gene %in% tad.deg ~ 'tad.deg',
+      gene %in% not.brain ~ 'not.brain',
+      T ~ 'other')
+  ) %>% 
+  filter(!is.na(hpa)) %>% 
+
+  # group_by(cellType, hpa) %>% 
+  # mutate(top_exp = quantile(upperQ_exp, 0.75),
+  #        top_fxn = quantile(fxn_exp, 0.95)) %>% 
+  # group_by(cellType) %>%  
+  # filter( upperQ_exp > unique(top_exp[hpa == 'not.brain']) ,
+  #         fxn_exp > unique(top_fxn[hpa == 'not.brain']) ) %>% 
+  # ungroup() %>% 
+  
+  filter( upperQ_exp >= -2.5 * fxn_exp + 2.3) %>%
+  
+  # filter( upperQ_exp >= 2 | (upperQ_exp >= 1.33 & fxn_exp >= 0.2) ) %>%
+
+  group_by(hpa) %>% 
+  mutate(
+    n = length(unique(gene)),
+    hpa1 = paste0(hpa, ', ', n)
+    ) %>% 
+  
+  ggplot(aes( upperQ_exp, fill = hpa1))+
+  # geom_density(aes(color = hpa), alpha = .1)+
+  geom_histogram(position = 'dodge')+
+  # scale_y_log10()+
+  scale_fill_discrete('')+scale_color_discrete('')+
+  guides(fill = guide_legend(nrow=2))+
+  ggforce::facet_zoom(xlim = c(0,2), ylim = c(0,3.5e4) )+
+  theme(legend.position = 'top')
+```
+
+
+```{r}
+# also "brain genes":
+# scores %>% filter(isScored_omics == 'Y', OmicsScore > 0) %>% pull(GeneName) %>% unique()
+
+seaad.broad %>% 
+  # filter( upperQ_exp >= 2 | (upperQ_exp >= 1.33 & fxn_exp >= 0.2) ) %>%
+  mutate(
+    hpa = case_when(
+      gene %in% brain.genes ~ 'brain.genes',
+      gene %in% tad.deg ~ 'tad.deg',
+      gene %in% not.brain ~ 'not.brain',
+      T ~ 'other')
+  ) %>% 
+  filter(!is.na(hpa)) %>% 
+
+  # group_by(cellType, hpa) %>% 
+  # mutate(top_exp = quantile(upperQ_exp, 0.75),
+  #        top_fxn = quantile(fxn_exp, 0.95)) %>% 
+  # group_by(cellType) %>%  
+  # filter( upperQ_exp > unique(top_exp[hpa == 'not.brain']) ,
+  #         fxn_exp > unique(top_fxn[hpa == 'not.brain']) ) %>% 
+  # ungroup() %>% 
+
+  filter( upperQ_exp >= -2.5 * fxn_exp + 2.3) %>%
+  
+  # filter( upperQ_exp >= 2 | (upperQ_exp >= 1.33 & fxn_exp >= 0.2) ) %>%
+
+  group_by(hpa) %>% 
+  mutate(
+    n = length(unique(gene)),
+    hpa1 = paste0(hpa, ', ', n)
+    ) %>% 
+
+  ggplot(aes( upperQ_exp, color = hpa1 ))+
+  geom_density( alpha = .1)+
+  # geom_histogram(position = 'dodge')+
+  # scale_y_log10()+
+  scale_fill_discrete('')+scale_color_discrete('')+
+  guides(color = guide_legend(nrow=2))+
+  ggforce::facet_zoom(xlim = c(0,2), ylim = c(0,1.3) )+
+  theme(legend.position = 'top')
+```
+
+```{r fig.width=6, fig.height=13, warning=FALSE}
+# seaad.broad %>% group_by(cellType) %>% summarise(mn = median(fraction_expressed))
+
+seaad.broad %>% 
+  # filter( upperQ_exp >= 2 | (upperQ_exp >= 1.33 & fxn_exp >= 0.2) ) %>%
+  mutate(
+    hpa = case_when(
+      gene %in% brain.genes ~ 'brain.genes',
+      gene %in% tad.deg ~ 'tad.deg',
+      gene %in% not.brain ~ 'not.brain',
+      T ~ 'other')
+  ) %>% 
+  filter(!is.na(hpa)) %>% 
+
+  # group_by(cellType, hpa) %>% 
+  # mutate(top_exp = quantile(upperQ_exp, 0.75),
+  #        top_fxn = quantile(fxn_exp, 0.95)) %>% 
+  # group_by(cellType) %>%  
+  # filter( upperQ_exp > unique(top_exp[hpa == 'not.brain']) ,
+  #         fxn_exp > unique(top_fxn[hpa == 'not.brain']) ) %>% 
+  # ungroup() %>% 
+
+  filter( upperQ_exp >= -2.5 * fxn_exp + 2.3) %>%
+  
+  # filter( upperQ_exp >= 2 | (upperQ_exp >= 1.33 & fxn_exp >= 0.2) ) %>%
+
+  group_by(hpa) %>% 
+  mutate(
+    n = length(unique(gene)),
+    hpa1 = paste0(hpa, ', ', n)
+    ) %>% 
+  
+  ggplot(., aes(upperQ_exp, cellType, fill = hpa1)) + 
+  geom_violin(scale = 'width', draw_quantiles = c(.5), trim = F) +
+  # geom_point(aes(x = top_exp, color = hpa))+
+  # stat_summary(fun = function(x) quantile(x,0.5), geom="point", size=2, color="red", position = 'dodge')+
+  # ggforce::facet_zoom(xlim = c(0,0.08), horizontal = F)
+  coord_cartesian(xlim = c(0,6))
+
+```
+
+
+### celltype-specific genes
+```{r}
+# McKenzie brain cell type specfic expression PMID 29892006
+url='https://www.ncbi.nlm.nih.gov/pmc/articles/PMC5995803/bin/41598_2018_27293_MOESM2_ESM.xlsx'
+httr::GET(url, httr::write_disk(tf <- tempfile(fileext = ".xlsx")))
+
+# readxl::excel_sheets(tf)
+# [1] "top_all_enrich"        "top_human_enrich"      "top_mouse_enrich"     
+# [4] "top_all_expression"    "top_human_expression"  "top_mouse_expression" 
+# [7] "top_all_specificity"   "top_human_specificity" "top_mouse_specificity"
+
+ct_spec = readxl::read_xlsx(tf,sheet = 'top_all_enrich', skip = 1)
+
+ct_spec %>% 
+  group_by(Celltype) %>% 
+  summarise(mn = median(grand_mean), sd = sd(grand_mean), mn_sd = mn+sd) %>% 
+  arrange(desc(mn_sd))
+
+dups = ct_spec$gene[which(duplicated(ct_spec$gene))] %>% unique() 
+```
+
+```{r}
+ct_spec %>% 
+  filter(!(gene %in% dups)) %>% 
+  group_by(Celltype) %>% 
+  mutate(mn = median(grand_mean), sd = sd(grand_mean), mn_sd = mn+sd) %>% 
+  ggplot(aes(grand_mean, color = Celltype))+
+  geom_density()+
+  geom_vline(aes(xintercept = mn_sd, color = Celltype))
+
+```
+
+
+```{r fig.width=7, fig.height=3, warning=FALSE}
+# seaad.broad = read_csv('/projects/carter-lab/caryg/seaAD/data/seaAD_broad_summaryCounts.csv')
+# seaad.broad = read_csv('/projects/carter-lab/caryg/seaAD/data/seaAD_broad_upperQ_summaryCounts.csv')
+
+ct_spec %>% 
+  filter(!(gene %in% dups)) %>% 
+  group_by(Celltype) %>% 
+  mutate(mn = median(grand_mean), sd = sd(grand_mean), mn_sd = mn+sd) %>% 
+  filter(grand_mean > mn_sd) %>% 
+  select(gene, Celltype) %>% 
+  distinct() %>% 
+  inner_join(seaad.broad, ., by = 'gene') %>% 
+
+  # filter( upperQ_exp >= -2.5 * fxn_exp + 2.5) %>%
+
+  ggplot(., aes(broad, upperQ_exp, fill = Celltype)) + 
+  geom_violin(scale = 'width', draw_quantiles = c(.5), trim = F) 
+
+```
+
+```{r fig.width=7, fig.height=3}
+# seaad.broad = read_csv('/projects/carter-lab/caryg/seaAD/data/seaAD_broad_summaryCounts.csv')
+# seaad.broad = read_csv('/projects/carter-lab/caryg/seaAD/data/seaAD_broad_upperQ_summaryCounts.csv')
+
+ct_spec %>% 
+  filter(!(gene %in% dups)) %>% 
+  group_by(Celltype) %>% 
+  mutate(mn = median(grand_mean), sd = sd(grand_mean), mn_sd = mn+sd) %>% 
+  filter(grand_mean > mn_sd) %>% 
+  select(gene, Celltype) %>% 
+  distinct() %>% 
+  inner_join(seaad.broad, ., by = 'gene') %>% 
+
+  filter( upperQ_exp >= -2.5 * fxn_exp + 2.3) %>%
+
+  ggplot(., aes(broad, upperQ_exp, fill = Celltype)) + 
+  geom_violin(scale = 'width', draw_quantiles = c(.5), trim = F) 
+
+```
+
+## supertype
+```{r}
+seaad = read_csv('/projects/carter-lab/caryg/seaAD/data/seaAD_upperQ_summaryCounts.csv')
+```
+### both dimensions
+
+```{r}
+t = .9
+
+tmp = seaad %>% 
+
+  # filter(gene %in% not.brain) %>% 
+  # mutate(hpa = 'not') %>% 
+
+  mutate(
+      hpa = case_when(
+          gene %in% brain.genes ~ 'brain',
+          gene %in% not.brain ~ 'not',
+          gene %in% tad.deg ~ 'deg',
+          T ~ 'other'
+      )
+  ) %>%
+
+  group_by(cellType, hpa) %>% 
+  summarise( 
+    exp = quantile(upperQ_exp, t), 
+    fxn = quantile(fxn_exp, t)
+    ) 
+
+# bind_rows(
+#     tmp, 
+#     tmp %>% filter(hpa == 'not') %>% mutate(exp = exp + .142, fxn = fxn + .142, hpa = 'new')
+#   ) %>% 
+tmp %>% 
+  ggplot(aes(fxn, exp, group = hpa))+
+  geom_smooth(method = 'lm', color = 'grey20', lwd = .5, lty = 2)+
+  # geom_abline(intercept = 1.5294, slope = -2.562569)+
+  geom_abline(intercept = 2.3, slope = -2.5)+
+  annotate(geom = 'text', x = .65, y = 0, label = 'y = -2.5x + 2.3', hjust = 0)+
+  geom_point(aes(color = cellType, shape = hpa), size = 2, alpha = .5)+
+  guides(color = 'none')+
+  labs(y = 'quantile expression', x = 'quantile fraction expressing',
+       subtitle = paste0('plotting quantile: ', t))
+
+```
+
+
+```{r}
+t = .9
+
+seaad %>% 
+  
+  # filter(gene %in% not.brain) %>% 
+  # mutate(hpa = 'not') %>% 
+
+  mutate(
+      hpa = case_when(
+          gene %in% brain.genes ~ 'brain',
+          gene %in% not.brain ~ 'not',
+          gene %in% tad.deg ~ 'deg',
+          T ~ 'other'
+      )
+  ) %>%
+  filter(hpa == 'not') %>%
+
+  group_by(cellType, hpa) %>%
+  summarise( exp = quantile(upperQ_exp, t), 
+             fxn = quantile(fxn_exp, t)
+             ) %>% 
+  lm(exp~fxn, data = .) %>% 
+  broom::tidy()
+```
+
+```{r}
+x = map_dfr(
+    seq(1.5,3,.1),
+    ~{
+        seaad %>% 
+            filter( upperQ_exp >= -2.5 * fxn_exp + .x) %>% 
+            summarise(
+                int = .x,
+                n.brain = length(intersect(gene, brain.genes )),
+                n.not = length(intersect(gene,not.brain)),
+                n.deg = length(intersect(gene,tad.deg)),
+                n.other = length(unique(setdiff(gene, union(union(brain.genes, tad.deg), not.brain)))),
+                diff.b = (n.brain - n.not),
+                pct.b = 100*(diff.b/n.brain),
+                diff.d = n.deg - n.not,
+                pct.d = 100*(diff.d/n.brain)
+            )
+    }
+) %>% 
+  arrange(desc(diff.b), desc(pct.d));
+
+qplot(x$int, x$diff.b, geom = 'line')
+
+DT::datatable(x)
+```
+
+```{r}
+t = .9
+
+thresh = seaad %>% 
+  filter(gene %in% not.brain) %>%
+  group_by(broad, cellType) %>%
+  summarise( 
+    exp1 = quantile(upperQ_exp, t),
+    fxn1 = quantile(fxn_exp, t)
+  ) %>% 
+  mutate(
+    exp = exp1+.142,
+    fxn = fxn1+.142,
+    hpa = 'new.dat'
+  ) 
+
+seaad %>% 
+
+  mutate(
+    hpa = case_when(
+        gene %in% brain.genes ~ 'brain',
+        gene %in% not.brain ~ 'not',
+        gene %in% tad.deg ~ 'deg',
+        T ~ 'other')
+      ) %>% 
+  ggplot(aes(fxn_exp, upperQ_exp, group = hpa))+
+  geom_abline(intercept = 2.3, slope = -2.5)+
+  # annotate(geom = 'text', x = .65, y = 0, label = 'y = -2.5x + 2.5', hjust = 0)+
+  geom_point(data = thresh, aes(x = fxn, y = exp), size = 2, alpha = .5)+
+  geom_smooth(method = 'lm', aes(color = hpa), lwd = .5, lty = 2)+
+  labs(y = 'expression', x = 'fraction expressing'
+       #, subtitle = paste0('plotting quantile: ', t)
+       )+
+  facet_wrap(~broad, scales = 'free')
+
+```
+
+
+```{r}
+t = .9
+
+thresh = seaad %>% 
+  filter(gene %in% not.brain) %>%
+  group_by(broad, cellType) %>%
+  summarise( 
+    exp1 = quantile(upperQ_exp, t),
+    fxn1 = quantile(fxn_exp, t)
+  ) %>% 
+  mutate(
+    exp = exp1+.142,
+    fxn = fxn1+.142,
+    hpa = 'new.dat'
+  ) 
+
+seaad %>% 
+  mutate(
+    hpa = case_when(
+        gene %in% brain.genes ~ 'brain',
+        gene %in% not.brain ~ 'not',
+        gene %in% tad.deg ~ 'deg',
+        T ~ 'other')
+      ) %>% 
+
+  # group_by(cellType) %>%
+  # filter(
+  #   fxn_exp >= thresh$fxn[ which(thresh$cellType == cellType) ] %>% unique(),
+  #   upperQ_exp >= thresh$exp[ which(thresh$cellType == cellType) ] %>% unique(),
+  #   .preserve = T
+  # ) %>%
+  # ungroup() %>%
+  
+  filter( upperQ_exp >= -2.5 * fxn_exp + 2.3) %>%
+
+  ggplot(aes(fxn_exp, upperQ_exp, group = hpa))+
+  geom_abline(intercept = 2.3, slope = -2.5)+
+  # annotate(geom = 'text', x = .65, y = 0, label = 'y = -2.5x + 2.5', hjust = 0)+
+  geom_point(data = thresh, aes(x = fxn, y = exp), size = 2, alpha = .5)+
+  geom_smooth(method = 'lm', aes(color = hpa), lwd = .5, lty = 2)+
+  labs(y = 'expression', x = 'fraction expressing'
+       #, subtitle = paste0('plotting quantile: ', t)
+       )+
+  facet_wrap(~broad, scales = 'free')
+
+```
+
+```{r fig.width=8, fig.height=6}
+seaad %>% 
+  ggplot(aes(upperQ_exp, fxn_exp))+ 
+  geom_bin2d(aes(fill = ..count.. ))+
+  viridis::scale_fill_viridis(trans = 'log10', option = 'A')+
+  ggtitle('no filter')+
+  facet_wrap(~broad)
+```
+
+```{r fig.width=8, fig.height=6}
+thresh = seaad %>% 
+  filter(gene %in% not.brain) %>%
+  group_by(broad, cellType) %>%
+  summarise( 
+    exp1 = quantile(upperQ_exp, t),
+    fxn1 = quantile(fxn_exp, t)
+  ) %>% 
+  mutate(
+    exp = exp1+.142,
+    fxn = fxn1+.142,
+    hpa = 'new.dat'
+  ) 
+
+seaad %>% 
+  mutate(
+    hpa = case_when(
+        gene %in% brain.genes ~ 'brain',
+        gene %in% tad.deg ~ 'deg',
+        gene %in% not.brain ~ 'not',
+        T ~ 'other')
+      ) %>% 
+  filter(!is.na(hpa)) %>%     
+
+  # group_by(cellType) %>%
+  # filter(
+  #   fxn_exp >= thresh$fxn[ which(thresh$cellType == cellType) ] %>% unique(),
+  #   upperQ_exp >= thresh$exp[ which(thresh$cellType == cellType) ] %>% unique(),
+  #   .preserve = T
+  # ) %>%
+  # ungroup() %>%
+
+  filter( upperQ_exp >= -2.5 * fxn_exp + 2.3) %>%
+
+  # group_by(cellType, hpa) %>% 
+  # mutate( exp = quantile(upperQ_exp, .9), 
+  #         fxn = quantile(fxn_exp, .9)
+  #         ) %>% 
+  # group_by(cellType) %>%
+  # filter(  ) %>%
+  # ungroup() %>% 
+  
+  ggplot(aes(upperQ_exp, fxn_exp))+ 
+  geom_bin2d(aes(fill = ..count.. ))+
+  viridis::scale_fill_viridis(trans = 'log10', option = 'A')+
+  facet_wrap(~broad)
+```
+
+```{r, fig.width=8, fig.height=8}
+
+seaad %>% 
+  mutate(
+    hpa = case_when(
+      gene %in% brain.genes ~ 'brain.genes',
+      gene %in% tad.deg ~ 'tad.deg',
+      gene %in% not.brain ~ 'not.brain',
+      T ~ 'other')
+  ) %>% 
+  filter(!is.na(hpa)) %>% 
+  group_by(hpa) %>% 
+  mutate(
+    n = length(unique(gene)),
+    hpa1 = paste0(hpa, ', ', n)
+    ) %>% 
+  ggplot(aes(upperQ_exp, fxn_exp))+ 
+  geom_bin2d(aes(fill = ..count.. ))+
+  viridis::scale_fill_viridis(trans = 'log10', option = 'A')+
+  ggtitle('no filter')+
+  facet_grid(broad~hpa1)
+ 
+```
+
+```{r, fig.width=8, fig.height=8}
+
+thresh = seaad %>% 
+  filter(gene %in% not.brain) %>%
+  group_by(broad, cellType) %>%
+  summarise( 
+    exp1 = quantile(upperQ_exp, t),
+    fxn1 = quantile(fxn_exp, t)
+  ) %>% 
+  mutate(
+    exp = exp1+.142,
+    fxn = fxn1+.142,
+    hpa = 'new.dat'
+  ) 
+
+seaad %>% 
+  mutate(
+    hpa = case_when(
+        gene %in% brain.genes ~ 'brain',
+        gene %in% tad.deg ~ 'tad.deg',
+        gene %in% not.brain ~ 'not.brain',
+        T ~ 'other')
+      ) %>% 
+  filter(!is.na(hpa)) %>%     
+
+  # group_by(cellType) %>%
+  # filter(
+  #   fxn_exp >= thresh$fxn[ which(thresh$cellType == cellType) ] %>% unique(),
+  #   upperQ_exp >= thresh$exp[ which(thresh$cellType == cellType) ] %>% unique(),
+  #   .preserve = T
+  # ) %>%
+  # ungroup() %>%
+  
+  filter( upperQ_exp >= -2.5 * fxn_exp + 2.3) %>%
+  
+  # filter( upperQ_exp >= 2 | (upperQ_exp >= 1.33 & fxn_exp >= 0.2) ) %>%
+
+  # group_by(cellType, hpa) %>%
+  # mutate(top_exp = quantile(upperQ_exp, 0.75),
+  #        top_fxn = quantile(fxn_exp, 0.95)) %>%
+  # group_by(cellType) %>%
+  # filter( upperQ_exp > unique(top_exp[hpa == 'not.brain']) ,
+  #         fxn_exp > unique(top_fxn[hpa == 'not.brain']) ) %>%
+  # ungroup() %>%
+  
+  group_by(hpa) %>% 
+  mutate(
+    n = length(unique(gene)),
+    hpa1 = paste0(hpa, ', ', n)
+    ) %>% 
+  ggplot(aes(upperQ_exp, fxn_exp))+ 
+  geom_bin2d(aes(fill = ..count.. ))+
+  viridis::scale_fill_viridis(trans = 'log10', option = 'A')+
+  ggtitle('filtered')+
+  facet_grid(broad~hpa1)
+ 
+```
+
+
+### fxn expressed
 ```{r}
 # also "brain genes":
 # scores %>% filter(isScored_omics == 'Y', OmicsScore > 0) %>% pull(GeneName) %>% unique()
@@ -286,127 +1326,906 @@ seaad %>%
       )
   ) %>% 
   filter(!is.na(hpa)) %>% 
-  ggplot(aes( log10(mean), fill = hpa))+
+  ggplot(aes( fxn_exp, fill = hpa))+
   geom_density(aes(color = hpa), alpha = .1)+
   # geom_histogram(position = 'dodge')+
   # scale_y_log10()+
   scale_fill_discrete('')+scale_color_discrete('')+
   guides(fill = guide_legend(nrow=2))+
+  ggforce::facet_zoom(xlim = c(0,.25), ylim = c(0,5))+
+  theme(legend.position = 'top')
+```
+
+```{r fig.width=6, fig.height=13}
+# seaad %>% group_by(cellType) %>% summarise(mn = median(fraction_expressed))
+
+seaad %>% 
+  mutate(
+    hpa = case_when(
+      gene %in% brain.genes ~ paste0('HPA brain (n = ', length(intersect(gene, brain.genes)),' genes)'),
+      gene %in% tad.deg ~ paste0('TAD DEG (n = ', length(intersect(gene,tad.deg)),' genes)'),
+      gene %in% not.brain ~ paste0('HPA not brain (n = ', length(intersect(gene,not.brain)),' genes)'),
+      T ~ paste0('other (n = ', length(unique(setdiff(gene, union(union(brain.genes, tad.deg), not.brain)))) ,' genes)')
+      )
+  ) %>% 
+  # group_by(cellType, hpa) %>% 
+  # mutate(top_exp = quantile(upperQ_exp, 0.75),
+  #        top_fxn = quantile(fxn_exp, 0.75)) %>% 
+  ggplot(., aes(fxn_exp, broad, fill = hpa)) + 
+  geom_violin(scale = 'width', draw_quantiles = c(.5)) +
+  # geom_point(aes(x = top_fxn, color = hpa))+
+  # stat_summary(fun = function(x) quantile(x,0.5), geom="point", size=2, color="red", position = 'dodge')+
+  # ggforce::facet_zoom(xlim = c(0,0.08), horizontal = F)
+  coord_cartesian(xlim = c(0,0.25))
+
+```
+
+```{r}
+# also "brain genes":
+# scores %>% filter(isScored_omics == 'Y', OmicsScore > 0) %>% pull(GeneName) %>% unique()
+
+seaad %>% 
+  # filter(is.na(group)) %>% 
+  mutate(
+    hpa = case_when(
+      gene %in% brain.genes ~ paste0('HPA brain (n = ', length(intersect(gene, brain.genes)),' genes)'),
+      gene %in% tad.deg ~ paste0('TAD DEG (n = ', length(intersect(gene,tad.deg)),' genes)'),
+      gene %in% not.brain ~ paste0('HPA not brain (n = ', length(intersect(gene,not.brain)),' genes)'),
+      T ~ paste0('other (n = ', length(unique(setdiff(gene, union(union(brain.genes, tad.deg), not.brain)))) ,' genes)')
+      )
+  ) %>% 
+  filter(!is.na(hpa)) %>% 
+  ggplot(aes( fxn_exp, fill = hpa))+
+  # geom_density(aes(color = hpa), alpha = .1)+
+  geom_histogram(position = 'dodge')+
+  # scale_y_log10()+
+  scale_fill_discrete('')+scale_color_discrete('')+
+  guides(fill = guide_legend(nrow=2))+
+  ggforce::facet_zoom(xlim = c(0,.25), ylim = c(0,1e5))+
   theme(legend.position = 'top')
 ```
 
 ```{r}
+# also "brain genes":
+# scores %>% filter(isScored_omics == 'Y', OmicsScore > 0) %>% pull(GeneName) %>% unique()
 
-seaad$gene %>% unique() %>% length() %>% print()
-
-```
-
-# Pairwise partial correlations
-
-Specify Enesmbl IDs of brain gene lists
-```{r}
-brain.genes.ensg <- 
-  tissue.array %>% filter(
-    Tissue %in% brain.tissues, 
-    Level %in% c('Low','Medium','High','Ascending','Descending'),
-    Reliability %in% c('Enhanced','Supported','Approved')) %>% 
-    pull(Gene) %>% unique()
-
-not.brain.ensg <- tissue.array %>% filter(
-  Tissue %in% brain.tissues,
-  Level %in% c('Not detected'),
-  Reliability %in% c('Enhanced','Supported','Approved')
-) %>% pull(Gene) %>% unique()
-
-tad.deg.ensg <- scores %>% filter(isScored_omics == 'Y', OmicsScore > 0) %>% pull(ENSG) %>% unique()
-```
-
-Load ROSMAP pairwise partial correlations
-```{r}
-rm.pcor <- read_csv(synGet('syn51061790')$path) %>% 
-  rename(gene1 = X1) %>% 
-  pivot_longer(cols = -gene1, names_to = 'gene2', values_to = 'pcor') %>% 
-  filter(pcor < 1) 
-```
-
-Classify pairs based on HPA expression and TREAT-AD DEG status
-```{r}
-rm.pcor <- rm.pcor %>% 
+seaad %>% 
+  # filter( upperQ_exp >= 2 | (upperQ_exp >= 1.33 & fxn_exp >= 0.2) ) %>%
   mutate(
-    brain = case_when(
-      (gene1 %in% brain.genes.ensg & gene2 %in% brain.genes.ensg) ~ 'yes, both',
-      (gene1 %in% not.brain.ensg & gene2 %in% not.brain.ensg) ~ 'no, both',
-      (gene1 %in% brain.genes.ensg | gene2 %in% brain.genes.ensg) ~ 'yes, one',
-      (gene1 %in% not.brain.ensg | gene2 %in% not.brain.ensg) ~ 'no, one',
-      T ~ 'other'
-    ),
-    tad.deg = case_when(
-      (gene1 %in% tad.deg.ensg & gene2 %in% tad.deg.ensg) ~ 'yes, both',
-      (gene1 %in% tad.deg.ensg | gene2 %in% tad.deg.ensg) ~ 'yes, one',
-      !(gene1 %in% tad.deg.ensg & gene2 %in% tad.deg.ensg) ~ 'no, both',
-      T ~ 'other'
-    )
-  ) 
+    hpa = case_when(
+      gene %in% brain.genes ~ 'brain.genes',
+      gene %in% tad.deg ~ 'tad.deg',
+      gene %in% not.brain ~ 'not.brain',
+      T ~ 'other')
+  ) %>% 
+  filter(!is.na(hpa)) %>% 
+
+  # group_by(cellType, hpa) %>% 
+  # mutate(top_exp = quantile(upperQ_exp, 0.75),
+  #        top_fxn = quantile(fxn_exp, 0.95)) %>% 
+  # group_by(cellType) %>%  
+  # filter( upperQ_exp > unique(top_exp[hpa == 'not.brain']) ,
+  #         fxn_exp > unique(top_fxn[hpa == 'not.brain']) ) %>% 
+  # ungroup() %>% 
+  
+  filter( upperQ_exp >= -2.5 * fxn_exp + 2.3) %>%
+  
+  # filter( upperQ_exp >= 2 | (upperQ_exp >= 1.33 & fxn_exp >= 0.2) ) %>%
+
+  group_by(hpa) %>% 
+  mutate(
+    n = length(unique(gene)),
+    hpa1 = paste0(hpa, ', ', n)
+    ) %>% 
+  
+  ggplot(aes( fxn_exp, fill = hpa1))+
+  # geom_density(aes(color = hpa1), alpha = .1)+
+  geom_histogram(position = 'dodge')+
+  # scale_y_log10()+
+  scale_fill_discrete('')+scale_color_discrete('')+
+  guides(fill = guide_legend(nrow=2))+
+  ggforce::facet_zoom(xlim = c(0,.25), ylim = c(0,1e5))+
+  theme(legend.position = 'top')
+```
+
+
+
+```{r}
+# also "brain genes":
+# scores %>% filter(isScored_omics == 'Y', OmicsScore > 0) %>% pull(GeneName) %>% unique()
+
+seaad %>% 
+  # filter( upperQ_exp >= 2 | (upperQ_exp >= 1.33 & fxn_exp >= 0.2) ) %>%
+  mutate(
+    hpa = case_when(
+      gene %in% brain.genes ~ 'brain.genes',
+      gene %in% tad.deg ~ 'tad.deg',
+      gene %in% not.brain ~ 'not.brain',
+      T ~ 'other')
+  ) %>% 
+  filter(!is.na(hpa)) %>% 
+
+  # group_by(cellType, hpa) %>% 
+  # mutate(top_exp = quantile(upperQ_exp, 0.75),
+  #        top_fxn = quantile(fxn_exp, 0.95)) %>% 
+  # group_by(cellType) %>%  
+  # filter( upperQ_exp > unique(top_exp[hpa == 'not.brain']) ,
+  #         fxn_exp > unique(top_fxn[hpa == 'not.brain']) ) %>% 
+  # ungroup() %>% 
+  
+  filter( upperQ_exp >= -2.5 * fxn_exp + 2.3) %>%
+  
+  # filter( upperQ_exp >= 2 | (upperQ_exp >= 1.33 & fxn_exp >= 0.2) ) %>%
+
+  group_by(hpa) %>% 
+  mutate(
+    n = length(unique(gene)),
+    hpa1 = paste0(hpa, ', ', n)
+    ) %>% 
+  
+  ggplot(aes( fxn_exp, color = hpa1))+
+  geom_density( alpha = .1)+
+  # geom_histogram(position = 'dodge')+
+  # scale_y_log10()+
+  geom_vline(xintercept = 0.2, lty = 2)+
+  scale_fill_discrete('')+scale_color_discrete('')+
+  guides(fill = guide_legend(nrow=2))+
+  ggforce::facet_zoom(xlim = c(0,.25), ylim = c(0,1.7))+#
+  theme(legend.position = 'top')
+```
+```{r fig.width=6, fig.height=13}
+# seaad %>% group_by(cellType) %>% summarise(mn = median(fraction_expressed))
+
+seaad %>% 
+  # filter( upperQ_exp >= 2 | (upperQ_exp >= 1.33 & fxn_exp >= 0.2) ) %>%
+  mutate(
+    hpa = case_when(
+      gene %in% brain.genes ~ 'brain.genes',
+      gene %in% tad.deg ~ 'tad.deg',
+      gene %in% not.brain ~ 'not.brain',
+      T ~ 'other')
+  ) %>% 
+  filter(!is.na(hpa)) %>% 
+
+  # group_by(cellType, hpa) %>% 
+  # mutate(top_exp = quantile(upperQ_exp, 0.75),
+  #        top_fxn = quantile(fxn_exp, 0.95)) %>% 
+  # group_by(cellType) %>%  
+  # filter( upperQ_exp > unique(top_exp[hpa == 'not.brain']) ,
+  #         fxn_exp > unique(top_fxn[hpa == 'not.brain']) ) %>% 
+  # ungroup() %>% 
+
+  filter( upperQ_exp >= -2.5 * fxn_exp + 2.3) %>%
+  
+  # filter( upperQ_exp >= 2 | (upperQ_exp >= 1.33 & fxn_exp >= 0.2) ) %>%
+
+  group_by(hpa) %>% 
+  mutate(
+    n = length(unique(gene)),
+    hpa1 = paste0(hpa, ', ', n)
+    ) %>% 
+
+  ggplot(., aes(fxn_exp, broad, fill = hpa1)) + 
+  geom_violin(scale = 'width', draw_quantiles = c(.5), trim = F) +
+  # geom_point(aes(x = top_fxn, color = hpa))+
+  # stat_summary(fun = function(x) quantile(x,0.5), geom="point", size=2, color="red", position = 'dodge')+
+  # ggforce::facet_zoom(xlim = c(0,0.08), horizontal = F)
+  coord_cartesian(xlim = c(0,1))
+
+```
+
+
+### avg expression
+
+```{r}
+# also "brain genes":
+# scores %>% filter(isScored_omics == 'Y', OmicsScore > 0) %>% pull(GeneName) %>% unique()
+
+seaad %>% 
+  # filter(is.na(group)) %>% 
+  mutate(
+    hpa = case_when(
+      gene %in% brain.genes ~ 'brain.genes',
+      gene %in% tad.deg ~ 'tad.deg',
+      gene %in% not.brain ~ 'not.brain',
+      T ~ 'other')
+  ) %>% 
+  filter(!is.na(hpa)) %>% 
+  group_by(hpa) %>% 
+  mutate(
+    n = length(unique(gene)),
+    hpa1 = paste0(hpa, ', ', n)
+    ) %>% 
+  ggplot(aes( (upperQ_exp), fill = hpa1))+
+  geom_density(aes(color = hpa), alpha = .1)+
+  # geom_histogram(position = 'dodge')+
+  # scale_y_log10()+
+  scale_fill_discrete('')+scale_color_discrete('')+
+  guides(fill = guide_legend(nrow=2))+
+  ggforce::facet_zoom(xlim = c(0,2), ylim = c(0,1.3) )+
+  theme(legend.position = 'top')
+
+```
+
+```{r fig.width=6, fig.height=13, warning=FALSE}
+# seaad %>% group_by(cellType) %>% summarise(mn = median(fraction_expressed))
+
+seaad %>% 
+  mutate(
+    hpa = case_when(
+      gene %in% brain.genes ~ 'brain.genes',
+      gene %in% tad.deg ~ 'tad.deg',
+      gene %in% not.brain ~ 'not.brain',
+      T ~ 'other')
+  ) %>% 
+  filter(!is.na(hpa)) %>% 
+  group_by(hpa) %>% 
+  mutate(
+    n = length(unique(gene)),
+    hpa1 = paste0(hpa, ', ', n)
+    ) %>% 
+  # group_by(cellType, hpa) %>% 
+  # mutate(top_exp = quantile(upperQ_exp, 0.75),
+  #        top_fxn = quantile(fxn_exp, 0.75)) %>% 
+  ggplot(., aes(upperQ_exp, broad, fill = hpa1)) + 
+  geom_violin(scale = 'width', draw_quantiles = c(.5)) +
+  # geom_point(aes(x = top_exp, color = hpa))+
+  # stat_summary(fun = function(x) quantile(x,0.5), geom="point", size=2, color="red", position = 'dodge')+
+  # ggforce::facet_zoom(xlim = c(0,0.08), horizontal = F)
+  coord_cartesian(xlim = c(0,6))
+
 ```
 
 
 ```{r}
-rm.pcor %>% 
-  ggplot( aes(pcor))+
-  scale_y_log10()+
-  # geom_density()
-  geom_histogram(aes(fill = brain), position = 'dodge')
+# also "brain genes":
+# scores %>% filter(isScored_omics == 'Y', OmicsScore > 0) %>% pull(GeneName) %>% unique()
+
+seaad %>% 
+  # filter(is.na(group)) %>% 
+  mutate(
+    hpa = case_when(
+      gene %in% brain.genes ~ 'brain.genes',
+      gene %in% tad.deg ~ 'tad.deg',
+      gene %in% not.brain ~ 'not.brain',
+      T ~ 'other')
+  ) %>% 
+  filter(!is.na(hpa)) %>% 
+  group_by(hpa) %>% 
+  mutate(
+    n = length(unique(gene)),
+    hpa1 = paste0(hpa, ', ', n)
+    ) %>% 
+  ggplot(aes( (upperQ_exp), fill = hpa1))+
+  # geom_density(aes(color = hpa), alpha = .1)+
+  geom_histogram(position = 'dodge')+
+  # scale_y_log10()+
+  scale_fill_discrete('')+scale_color_discrete('')+
+  guides(fill = guide_legend(nrow=2))+
+  ggforce::facet_zoom(xlim = c(0,2), ylim = c(0,3.5e4) )+
+  theme(legend.position = 'top')
+
+```
+
+```{r}
+# also "brain genes":
+# scores %>% filter(isScored_omics == 'Y', OmicsScore > 0) %>% pull(GeneName) %>% unique()
+
+seaad %>% 
+  # filter( upperQ_exp >= 2 | (upperQ_exp >= 1.33 & fxn_exp >= 0.2) ) %>%
+  mutate(
+    hpa = case_when(
+      gene %in% brain.genes ~ 'brain.genes',
+      gene %in% tad.deg ~ 'tad.deg',
+      gene %in% not.brain ~ 'not.brain',
+      T ~ 'other')
+  ) %>% 
+  filter(!is.na(hpa)) %>% 
+
+  # group_by(cellType, hpa) %>% 
+  # mutate(top_exp = quantile(upperQ_exp, 0.75),
+  #        top_fxn = quantile(fxn_exp, 0.95)) %>% 
+  # group_by(cellType) %>%  
+  # filter( upperQ_exp > unique(top_exp[hpa == 'not.brain']) ,
+  #         fxn_exp > unique(top_fxn[hpa == 'not.brain']) ) %>% 
+  # ungroup() %>% 
+  
+  filter( upperQ_exp >= -2.5 * fxn_exp + 2.3) %>%
+  
+  # filter( upperQ_exp >= 2 | (upperQ_exp >= 1.33 & fxn_exp >= 0.2) ) %>%
+
+  group_by(hpa) %>% 
+  mutate(
+    n = length(unique(gene)),
+    hpa1 = paste0(hpa, ', ', n)
+    ) %>% 
+  
+  ggplot(aes( upperQ_exp, fill = hpa1))+
+  # geom_density(aes(color = hpa), alpha = .1)+
+  geom_histogram(position = 'dodge')+
+  # scale_y_log10()+
+  scale_fill_discrete('')+scale_color_discrete('')+
+  guides(fill = guide_legend(nrow=2))+
+  ggforce::facet_zoom(xlim = c(0,2), ylim = c(0,3.5e4) )+
+  theme(legend.position = 'top')
 ```
 
 
 ```{r}
-rm.pcor %>% 
-  ggplot( aes( abs(pcor), fill = brain) )+
-  scale_y_log10()+
-  # geom_density(aes(color = brain), alpha = 0.1 )
-  geom_histogram(aes(fill = brain), position = 'dodge')
+# also "brain genes":
+# scores %>% filter(isScored_omics == 'Y', OmicsScore > 0) %>% pull(GeneName) %>% unique()
+
+seaad %>% 
+  # filter( upperQ_exp >= 2 | (upperQ_exp >= 1.33 & fxn_exp >= 0.2) ) %>%
+  mutate(
+    hpa = case_when(
+      gene %in% brain.genes ~ 'brain.genes',
+      gene %in% tad.deg ~ 'tad.deg',
+      gene %in% not.brain ~ 'not.brain',
+      T ~ 'other')
+  ) %>% 
+  filter(!is.na(hpa)) %>% 
+
+  # group_by(cellType, hpa) %>% 
+  # mutate(top_exp = quantile(upperQ_exp, 0.75),
+  #        top_fxn = quantile(fxn_exp, 0.95)) %>% 
+  # group_by(cellType) %>%  
+  # filter( upperQ_exp > unique(top_exp[hpa == 'not.brain']) ,
+  #         fxn_exp > unique(top_fxn[hpa == 'not.brain']) ) %>% 
+  # ungroup() %>% 
+
+  filter( upperQ_exp >= -2.5 * fxn_exp + 2.3) %>%
+  
+  # filter( upperQ_exp >= 2 | (upperQ_exp >= 1.33 & fxn_exp >= 0.2) ) %>%
+
+  group_by(hpa) %>% 
+  mutate(
+    n = length(unique(gene)),
+    hpa1 = paste0(hpa, ', ', n)
+    ) %>% 
+
+  ggplot(aes( upperQ_exp, color = hpa1 ))+
+  geom_density( alpha = .1)+
+  # geom_histogram(position = 'dodge')+
+  # scale_y_log10()+
+  scale_fill_discrete('')+scale_color_discrete('')+
+  guides(color = guide_legend(nrow=2))+
+  ggforce::facet_zoom(xlim = c(0,2), ylim = c(0,1.3) )+
+  theme(legend.position = 'top')
+```
+
+```{r fig.width=6, fig.height=13, warning=FALSE}
+# seaad %>% group_by(cellType) %>% summarise(mn = median(fraction_expressed))
+
+seaad %>% 
+  # filter( upperQ_exp >= 2 | (upperQ_exp >= 1.33 & fxn_exp >= 0.2) ) %>%
+  mutate(
+    hpa = case_when(
+      gene %in% brain.genes ~ 'brain.genes',
+      gene %in% tad.deg ~ 'tad.deg',
+      gene %in% not.brain ~ 'not.brain',
+      T ~ 'other')
+  ) %>% 
+  filter(!is.na(hpa)) %>% 
+
+  # group_by(cellType, hpa) %>% 
+  # mutate(top_exp = quantile(upperQ_exp, 0.75),
+  #        top_fxn = quantile(fxn_exp, 0.95)) %>% 
+  # group_by(cellType) %>%  
+  # filter( upperQ_exp > unique(top_exp[hpa == 'not.brain']) ,
+  #         fxn_exp > unique(top_fxn[hpa == 'not.brain']) ) %>% 
+  # ungroup() %>% 
+
+  filter( upperQ_exp >= -2.5 * fxn_exp + 2.3) %>%
+  
+  # filter( upperQ_exp >= 2 | (upperQ_exp >= 1.33 & fxn_exp >= 0.2) ) %>%
+
+  group_by(hpa) %>% 
+  mutate(
+    n = length(unique(gene)),
+    hpa1 = paste0(hpa, ', ', n)
+    ) %>% 
+  
+  ggplot(., aes(upperQ_exp, broad, fill = hpa1)) + 
+  geom_violin(scale = 'width', draw_quantiles = c(.5), trim = F) +
+  # geom_point(aes(x = top_exp, color = hpa))+
+  # stat_summary(fun = function(x) quantile(x,0.5), geom="point", size=2, color="red", position = 'dodge')+
+  # ggforce::facet_zoom(xlim = c(0,0.08), horizontal = F)
+  coord_cartesian(xlim = c(0,6))
+
 ```
 
 ```{r}
-rm.pcor %>% 
-  ggplot( aes( abs(pcor), fill = tad.deg))+
-  scale_y_log10()+
-  # geom_density(aes(color = tad.deg), alpha = 0.1 )
-  geom_histogram(aes(fill = brain), position = 'dodge')
+seaad.expr <- seaad %>% 
+  filter( upperQ_exp >= -2.5 * fxn_exp + 2.3 ) %>%
+  pull(gene) %>% 
+  unique()
 ```
 
-```{r fig.width=8, fig.height=4}
-x = rm.pcor %>% 
-     filter(gene1 %in% setdiff(brain.genes.ensg, not.brain.ensg)) %>% 
-     group_by(gene1) %>% 
-     summarise(
-         mean_bg = max((pcor[gene2 %in% setdiff(brain.genes.ensg, not.brain.ensg)]), na.rm = T),
-         mean_nbg = max((pcor[gene2 %in% setdiff(not.brain.ensg, brain.genes.ensg)]), na.rm = T)
-     ) 
-y = rm.pcor %>% 
-     filter(gene1 %in% setdiff(not.brain.ensg, brain.genes.ensg)) %>% 
-     group_by(gene1) %>% 
-     summarise(
-         mean_bg = max((pcor[gene2 %in% setdiff(brain.genes.ensg, not.brain.ensg)]), na.rm = T),
-         mean_nbg = max((pcor[gene2 %in% setdiff(not.brain.ensg, brain.genes.ensg)]), na.rm = T)
-     )
 
-cowplot::plot_grid( 
-    ggplot(x, aes(mean_bg, mean_nbg)) + 
-        geom_abline(intercept = 0, slope = 1, lty = 2, lwd = .5)+
-        geom_smooth(method = 'lm', lwd = .5, color = 'grey20')+
-        # coord_cartesian(xlim = c(0.05,0.15), ylim = c(0.05,0.15))+
-      geom_point( alpha = .3 )+
-        labs(title = 'brain genes', x = 'max  pcor\nbrain genes', y = 'max  pcor\nnon-brain genes'),
-    ggplot(y, aes(mean_bg, mean_nbg)) + 
-        geom_abline(intercept = 0, slope = 1, lty = 2, lwd = .5)+
-        geom_smooth(method = 'lm', lwd = .5, color = 'grey20')+
-        # coord_cartesian(xlim = c(0.05,0.15), ylim = c(0.05,0.15))+
-      geom_point( alpha = .3 )+
-        labs(title = 'non brain genes', x = 'max  pcor\nbrain genes', y = 'max  pcor\nnon-brain genes')
+# NODE: overall
+
+```{r}
+tot.nodes = v.attr$name
+filt.nodes = union(seaad.expr, tad.deg) %>% union(., brain.genes) %>% intersect(.,v.attr$name) 
+
+grid::grid.newpage()
+grid::grid.draw(
+  VennDiagram::venn.diagram(
+        x = list(
+          `PathCommons_NW\n(19087)` = v.attr$name %>% .[!is.na(.)], 
+          `HumanProtAtlas_brain\n(4140)` = brain.genes %>% .[!is.na(.)],
+          `SeaAD\n(10594)` = seaad.expr %>% .[!is.na(.)],
+          `TreatAD_DEG\n(11910)` = tad.deg %>% .[!is.na(.)]
+        ),
+        filename = NULL,
+        force.unique = T,
+        lty = 0, alpha = .3 , 
+        fill = c('light blue','yellow', 'green','purple'),
+        
+        sub = paste0('# Pathway Commons nodes: ', length(tot.nodes),
+                     '\n# filtered nodes: ', length(filt.nodes), 
+                     ' (', signif( 100*length(filt.nodes)/length(tot.nodes), digits = 4), '%)' ),
+        
+        cat.cex = .8,
+        ext.pos = 180,
+        ext.dist = -.1
+        )
 )
+
 ```
 
+
+# EDGE: Pathway Commons Network
+
+Specify the directed-edge types to filter the Pathway Commons graph  
+```{r}
+directed_edge_types = c("catalysis-precedes",
+                        "controls-expression-of",
+                        "controls-phosphorylation-of",
+                        "controls-state-change-of",
+                        "controls-transport-of"
+                        )
+
+# dir.net <- graph_from_data_frame(d = net.tbl %>% filter(interaction %in% directed_edge_types), directed = T)
+```
+
+How many edges from each source?  
+```{r warning=FALSE}
+bind_cols(
+    sources = str_split(net.tbl$sources,',') %>% unlist %>% unique, 
+    n_edge = map_dbl( 
+        str_split(net.tbl$sources,',') %>% unlist %>% unique, 
+        ~ net.tbl %>% filter(grepl(.x, sources)) %>% nrow() ),
+    any_directed = map_lgl(
+        str_split(net.tbl$sources,',') %>% unlist %>% unique, 
+        ~ net.tbl %>% 
+            mutate(directed = if_else(interaction %in% directed_edge_types, 'dir','undir') ) %>% 
+            filter(grepl(.x, sources)) %>% pull(directed) %>% any(. == 'dir')
+    )
+) %>% 
+  mutate(any_directed = if_else(is.na(any_directed), FALSE, TRUE),
+         any_directed = factor(any_directed, levels=c('TRUE','FALSE'))) %>%
+  arrange(desc(n_edge)) %>% mutate(sources = fct_relevel(sources, sources)) %>%
+  ggplot(aes(sources, n_edge)) + geom_bar(stat = 'identity', aes(fill = any_directed)) +
+  # scale_y_log10()+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1)
+        , legend.position = 'top')
+```
+
+Which edge sources are (generally) well supported?  
+```{r warning=FALSE}
+bind_cols(
+    sources = str_split(net.tbl$sources,',') %>% unlist %>% unique, 
+    n_edge = map_dbl( 
+      str_split(net.tbl$sources,',') %>% unlist %>% unique, 
+      ~ net.tbl %>% filter(grepl(.x, sources)) %>% nrow() )
+    , median_evidence_per_edge = map_dbl( 
+      str_split(net.tbl$sources,',') %>% unlist %>% unique, 
+      ~ net.tbl %>% filter(grepl(.x, sources)) %>% pull(n_edge_evidence) %>% median() )
+    , any_directed = map_lgl(
+        str_split(net.tbl$sources,',') %>% unlist %>% unique, 
+        ~ net.tbl %>% 
+            mutate(directed = if_else(interaction %in% directed_edge_types, 'dir','undir') ) %>% 
+            filter(grepl(.x, sources)) %>% pull(directed) %>% any(. == 'dir') )
+) %>% 
+  mutate(any_directed = if_else(is.na(any_directed), FALSE, TRUE),
+         any_directed = factor(any_directed, levels=c('TRUE','FALSE'))) %>%
+  arrange(desc(n_edge)) %>% mutate(sources = fct_relevel(sources, sources)) %>% 
+  ggplot(aes(n_edge, median_evidence_per_edge)) +
+  geom_point( aes(color = any_directed )) + 
+  scale_x_log10()+ 
+  theme(legend.position = 'top')+
+  ggrepel::geom_label_repel(aes(label = sources), size = 3)
+  # theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1)) 
+```
+
+Distribution of evidence support for edges
+```{r}
+net.tbl %>% 
+  mutate(directed = if_else(interaction %in% directed_edge_types, 'dir','undir') ) %>% 
+  ggplot(aes(n_edge_evidence))+
+  stat_ecdf(geom = 'line', aes(color = directed))+
+  # geom_density(aes(fill = directed))+
+  # geom_histogram(aes(fill = directed), position = position_dodge())+
+  # scale_y_log10()+
+  scale_x_log10()+
+  geom_vline(xintercept = 2, lty = 2, lwd = .5)+
+  labs(y = 'fraction of edges')
+```
+Distribution of evidence support for edges
+```{r}
+net.tbl %>% 
+  mutate(directed = if_else(interaction %in% directed_edge_types, 'dir','undir') ) %>% 
+  ggplot(aes(n_edge_types))+
+  stat_ecdf(geom = 'line', aes(color = directed))+
+  # geom_density(aes(fill = directed))+
+  # geom_histogram(aes(fill = directed), position = position_dodge())+
+  # scale_y_log10()+
+  # scale_x_log10()+
+  geom_vline(xintercept = 2, lty = 2, lwd = .5)+
+  labs(y = 'fraction of edges')
+```
+
+Distribution of evidence support for edges
+```{r}
+net.tbl %>% 
+  mutate(directed = if_else(interaction %in% directed_edge_types, 'dir','undir') ) %>% 
+  ggplot(aes(n_source))+
+  stat_ecdf(geom = 'line', aes(color = directed))+
+  # geom_density(aes(fill = directed))+
+  # geom_histogram(aes(fill = directed), position = position_dodge())+
+  # scale_y_log10()+
+  scale_x_log10()+
+  geom_vline(xintercept = 2, lty = 2, lwd = .5)+
+  labs(y = 'fraction of edges')
+```
+
+Distribution of evidence support for edges
+```{r}
+net.tbl %>% 
+  mutate(directed = if_else(interaction %in% directed_edge_types, 'dir','undir') ) %>%
+  filter(n_edge_evidence > 1
+         | (n_edge_evidence == 1 & n_edge_types > 2 & n_source > 2)) %>% 
+  ggplot(aes(n_edge))+
+  # stat_ecdf(geom = 'line', aes(color = directed))+
+  geom_histogram(color = 'grey20', fill = 'grey80')+
+  
+  # scale_x_log10()+
+  # geom_vline(xintercept = 2, lty = 2, lwd = .5)+
+  labs()
+```
+
+Distribution of evidence support for edges
+```{r}
+net.tbl %>% 
+  # mutate(directed = if_else(interaction %in% directed_edge_types, 'dir','undir') ) %>% 
+  ggplot(aes( n_edge_types, n_edge_evidence ))+
+  geom_point()+
+  geom_smooth(method = 'lm')+
+  scale_y_log10()+
+  # scale_x_log10()+
+  # geom_vline(xintercept = 2, lty = 2, lwd = .5)+
+  labs()
+```
+
+# EDGE: Pairwise partial correlations
+
+Dropping this for the moment because:
+1. the current pcor calculations would need to be recalculated on a tissue specific basis
+2. the data are large, unwieldy, and of uncertain utility 
+
+May return at a later time. 
+
+<!-- ## ROSMAP -->
+<!-- Load ROSMAP pairwise partial correlations -->
+<!-- ```{r} -->
+<!-- # st = Sys.time() -->
+<!-- #  -->
+<!-- # # download and pivot pcor table -->
+<!-- # synLogin() -->
+<!-- # rm.pcor <- read_csv(synGet('syn51061790')$path) %>%  -->
+<!-- #   rename(gene1 = X1) %>%  -->
+<!-- #   pivot_longer(cols = -gene1, names_to = 'gene2', values_to = 'pcor') %>%  -->
+<!-- #   filter( gene1 != gene2 )  -->
+<!-- #  -->
+<!-- # cat('download: \n') -->
+<!-- # Sys.time() - st -->
+<!-- #  -->
+<!-- # # get gene symbols corresponding to Ensembl IDs -->
+<!-- # genes <- union(rm.pcor$gene1, rm.pcor$gene2) -->
+<!-- # sym <- gprofiler2::gconvert( -->
+<!-- #   genes,  -->
+<!-- #   organism = 'hsapiens', -->
+<!-- #   target = 'HGNC' -->
+<!-- # ) %>%  -->
+<!-- #   select( gene1 = input, gene2 = input, symbol1 = target, symbol2 = target) -->
+<!-- #  -->
+<!-- # cat('id conversion: \n') -->
+<!-- # Sys.time() - st -->
+<!-- #  -->
+<!-- # # add symbols to table -->
+<!-- # # remove genes without symbols (therefore not in NW) -->
+<!-- # # & put genes in consistent order to reduce dataset size -->
+<!-- # rm.pcor <-  -->
+<!-- #   left_join( rm.pcor, sym %>% select(ends_with('1')), by = 'gene1') %>%  -->
+<!-- #   left_join( .,       sym %>% select(ends_with('2')), by = 'gene2') %>%  -->
+<!-- #   filter(!is.na(symbol1), !is.na(symbol2))  -->
+<!-- # # %>%  -->
+<!-- # #   mutate( -->
+<!-- # #     T1=ifelse(symbol1 < symbol2, symbol1, symbol2), -->
+<!-- # #     T2=ifelse(symbol1 < symbol2, symbol2, symbol1), -->
+<!-- # #     edge = paste0(T1,':',T2) -->
+<!-- # #   ) %>%  -->
+<!-- # #   select(symbol1 = T1, symbol2 = T2, edge, pcor) %>% -->
+<!-- # #   distinct() -->
+<!-- #  -->
+<!-- # cat('full process: \n') -->
+<!-- # Sys.time() - st -->
+
+<!-- rm.pcor = readRDS('data/rosmap_pcor.rds') -->
+<!-- ``` -->
+
+<!-- pcor distribution -->
+<!-- ```{r} -->
+<!-- rm.pcor %>%  -->
+<!--   mutate(set = case_when(edge %in% e.attr$edge, 'PathCommonsNW','None')) %>%  -->
+<!--   ggplot(aes( abs(pcor) )) + -->
+<!--   # geom_histogram()+ -->
+<!--   # scale_y_log10()+ -->
+<!--   geom_density(aes(fill = set), alpha = .3)+ -->
+<!--   theme_bw() -->
+<!-- ``` -->
+
+<!-- ```{r} -->
+<!-- rm.pcor <- rm.pcor %>%  -->
+<!--   filter(edge %in% e.attr$edge) -->
+<!-- ``` -->
+
+<!-- pcor distribution -->
+<!-- ```{r} -->
+<!-- rm.pcor %>%  -->
+<!--   ggplot(aes(pcor)) + -->
+<!--   geom_histogram()+ -->
+<!--   scale_y_log10()+ -->
+<!--   theme_bw() -->
+<!-- ``` -->
+
+<!-- pcor distribution -->
+<!-- ```{r} -->
+<!-- rm.pcor %>%  -->
+<!--   mutate(set = if_else( edge %in% e.attr$edge[e.attr$n_evidence >= 2], '>= 2 PMID','< 2 PMID')) %>%  -->
+<!--   ggplot(aes(pcor)) + -->
+<!--   geom_histogram( aes(fill = set), position = 'dodge')+ -->
+<!--   # scale_y_log10()+ -->
+<!--   # geom_density(aes(fill = set), alpha = .3)+ -->
+<!--   theme_bw() -->
+<!-- ``` -->
+
+<!-- ```{r} -->
+<!-- rm.pcor %>%  -->
+<!--   filter(  -->
+<!--     abs(pcor) > mean(abs(pcor))+3*sd(abs(pcor)),  -->
+<!--     edge %in% e.attr$edge[e.attr$n_evidence < 2] ) %>%  -->
+<!--   ggplot(aes(pcor)) + -->
+<!--   geom_histogram()+ -->
+<!--   scale_y_log10()+ -->
+<!--   # geom_density(aes(fill = set), alpha = .3)+ -->
+<!--   theme_bw() -->
+
+<!-- ``` -->
+
+<!-- Classify pairs based on HPA expression and TREAT-AD DEG status -->
+<!-- ```{r} -->
+<!-- rm.pcor <- rm.pcor %>%  -->
+<!--   mutate( -->
+<!--     brain = case_when( -->
+<!--       (gene1 %in% brain.genes.ensg & gene2 %in% brain.genes.ensg) ~ 'yes, both', -->
+<!--       (gene1 %in% not.brain.ensg & gene2 %in% not.brain.ensg) ~ 'no, both', -->
+<!--       (gene1 %in% brain.genes.ensg | gene2 %in% brain.genes.ensg) ~ 'yes, one', -->
+<!--       (gene1 %in% not.brain.ensg | gene2 %in% not.brain.ensg) ~ 'no, one', -->
+<!--       T ~ 'other' -->
+<!--     ), -->
+<!--     tad.deg = case_when( -->
+<!--       (gene1 %in% tad.deg.ensg & gene2 %in% tad.deg.ensg) ~ 'yes, both', -->
+<!--       (gene1 %in% tad.deg.ensg | gene2 %in% tad.deg.ensg) ~ 'yes, one', -->
+<!--       !(gene1 %in% tad.deg.ensg & gene2 %in% tad.deg.ensg) ~ 'no, both', -->
+<!--       T ~ 'other' -->
+<!--     ) -->
+<!--   )  -->
+<!-- ``` -->
+
+
+<!-- ```{r} -->
+<!-- rm.pcor %>%  -->
+<!--   ggplot( aes(pcor))+ -->
+<!--   scale_y_log10()+ -->
+<!--   # geom_density() -->
+<!--   geom_histogram(aes(fill = brain), position = 'dodge') -->
+<!-- ``` -->
+
+
+<!-- ```{r} -->
+<!-- rm.pcor %>%  -->
+<!--   ggplot( aes( abs(pcor), fill = brain) )+ -->
+<!--   scale_y_log10()+ -->
+<!--   # geom_density(aes(color = brain), alpha = 0.1 ) -->
+<!--   geom_histogram(aes(fill = brain), position = 'dodge') -->
+<!-- ``` -->
+
+<!-- ```{r} -->
+<!-- rm.pcor %>%  -->
+<!--   ggplot( aes( abs(pcor), fill = tad.deg))+ -->
+<!--   scale_y_log10()+ -->
+<!--   # geom_density(aes(color = tad.deg), alpha = 0.1 ) -->
+<!--   geom_histogram(aes(fill = brain), position = 'dodge') -->
+<!-- ``` -->
+
+<!-- ```{r fig.width=8, fig.height=4} -->
+<!-- x = rm.pcor %>%  -->
+<!--      filter(gene1 %in% setdiff(brain.genes.ensg, not.brain.ensg)) %>%  -->
+<!--      group_by(gene1) %>%  -->
+<!--      summarise( -->
+<!--          mean_bg = max((pcor[gene2 %in% setdiff(brain.genes.ensg, not.brain.ensg)]), na.rm = T), -->
+<!--          mean_nbg = max((pcor[gene2 %in% setdiff(not.brain.ensg, brain.genes.ensg)]), na.rm = T) -->
+<!--      )  -->
+<!-- y = rm.pcor %>%  -->
+<!--      filter(gene1 %in% setdiff(not.brain.ensg, brain.genes.ensg)) %>%  -->
+<!--      group_by(gene1) %>%  -->
+<!--      summarise( -->
+<!--          mean_bg = max((pcor[gene2 %in% setdiff(brain.genes.ensg, not.brain.ensg)]), na.rm = T), -->
+<!--          mean_nbg = max((pcor[gene2 %in% setdiff(not.brain.ensg, brain.genes.ensg)]), na.rm = T) -->
+<!--      ) -->
+
+<!-- cowplot::plot_grid(  -->
+<!--     ggplot(x, aes(mean_bg, mean_nbg)) +  -->
+<!--         geom_abline(intercept = 0, slope = 1, lty = 2, lwd = .5)+ -->
+<!--         geom_smooth(method = 'lm', lwd = .5, color = 'grey20')+ -->
+<!--         # coord_cartesian(xlim = c(0.05,0.15), ylim = c(0.05,0.15))+ -->
+<!--       geom_point( alpha = .3 )+ -->
+<!--         labs(title = 'brain genes', x = 'max  pcor\nbrain genes', y = 'max  pcor\nnon-brain genes'), -->
+<!--     ggplot(y, aes(mean_bg, mean_nbg)) +  -->
+<!--         geom_abline(intercept = 0, slope = 1, lty = 2, lwd = .5)+ -->
+<!--         geom_smooth(method = 'lm', lwd = .5, color = 'grey20')+ -->
+<!--         # coord_cartesian(xlim = c(0.05,0.15), ylim = c(0.05,0.15))+ -->
+<!--       geom_point( alpha = .3 )+ -->
+<!--         labs(title = 'non brain genes', x = 'max  pcor\nbrain genes', y = 'max  pcor\nnon-brain genes') -->
+<!-- ) -->
+<!-- ``` -->
+
+<!-- ## Mayo -->
+
+<!-- Load Mayo pairwise partial correlations -->
+<!-- ```{r} -->
+<!-- st = Sys.time() -->
+
+<!-- # download and pivot pcor table -->
+<!-- synLogin() -->
+<!-- my.pcor <- read_csv(synGet('syn51061614')$path) %>%  -->
+<!--   rename(gene1 = X1) %>%  -->
+<!--   pivot_longer(cols = -gene1, names_to = 'gene2', values_to = 'pcor') %>%  -->
+<!--   filter( gene1 != gene2 )  -->
+
+<!-- cat('download: \n') -->
+<!-- Sys.time() - st -->
+
+<!-- # get gene symbols corresponding to Ensembl IDs -->
+<!-- genes <- union(my.pcor$gene1, my.pcor$gene2) -->
+<!-- sym <- gprofiler2::gconvert( -->
+<!--   genes,  -->
+<!--   organism = 'hsapiens', -->
+<!--   target = 'HGNC' -->
+<!-- ) %>%  -->
+<!--   select( gene1 = input, gene2 = input, symbol1 = target, symbol2 = target) -->
+
+<!-- cat('id conversion: \n') -->
+<!-- Sys.time() - st -->
+
+<!-- # add symbols to table -->
+<!-- # remove genes without symbols (therefore not in NW) -->
+<!-- # & put genes in consistent order to reduce dataset size -->
+<!-- my.pcor <-  -->
+<!--   left_join( my.pcor, sym %>% select(ends_with('1')), by = 'gene1') %>%  -->
+<!--   left_join( .,       sym %>% select(ends_with('2')), by = 'gene2') %>%  -->
+<!--   filter(!is.na(symbol1), !is.na(symbol2)) %>%  -->
+<!--   mutate( -->
+<!--     T1=ifelse(symbol1 < symbol2, symbol1, symbol2), -->
+<!--     T2=ifelse(symbol1 < symbol2, symbol2, symbol1), -->
+<!--     edge = paste0(T1,':',T2) -->
+<!--   ) %>%  -->
+<!--   select(symbol1 = T1, symbol2 = T2, edge, pcor) %>% -->
+<!--   distinct() -->
+
+<!-- cat('full process: \n') -->
+<!-- Sys.time() - st -->
+
+
+<!-- ``` -->
+
+<!-- ## MSSM -->
+
+<!-- Load Sinai pairwise partial correlations -->
+<!-- ```{r} -->
+<!-- st = Sys.time() -->
+
+<!-- # download and pivot pcor table -->
+<!-- synLogin() -->
+<!-- ms.pcor <- read_csv(synGet('syn51061324')$path) %>%  -->
+<!--   rename(gene1 = X1) %>%  -->
+<!--   pivot_longer(cols = -gene1, names_to = 'gene2', values_to = 'pcor') %>%  -->
+<!--   filter( gene1 != gene2 )  -->
+
+<!-- cat('download: \n') -->
+<!-- Sys.time() - st -->
+
+<!-- # get gene symbols corresponding to Ensembl IDs -->
+<!-- genes <- union(ms.pcor$gene1, ms.pcor$gene2) -->
+<!-- sym <- gprofiler2::gconvert( -->
+<!--   genes,  -->
+<!--   organism = 'hsapiens', -->
+<!--   target = 'HGNC' -->
+<!-- ) %>%  -->
+<!--   select( gene1 = input, gene2 = input, symbol1 = target, symbol2 = target) -->
+
+<!-- cat('id conversion: \n') -->
+<!-- Sys.time() - st -->
+
+<!-- # add symbols to table -->
+<!-- # remove genes without symbols (therefore not in NW) -->
+<!-- # & put genes in consistent order to reduce dataset size -->
+<!-- ms.pcor <-  -->
+<!--   left_join( ms.pcor, sym %>% select(ends_with('1')), by = 'gene1') %>%  -->
+<!--   left_join( .,       sym %>% select(ends_with('2')), by = 'gene2') %>%  -->
+<!--   filter(!is.na(symbol1), !is.na(symbol2)) %>%  -->
+<!--   mutate( -->
+<!--     T1=ifelse(symbol1 < symbol2, symbol1, symbol2), -->
+<!--     T2=ifelse(symbol1 < symbol2, symbol2, symbol1), -->
+<!--     edge = paste0(T1,':',T2) -->
+<!--   ) %>%  -->
+<!--   select(symbol1 = T1, symbol2 = T2, edge, pcor) %>% -->
+<!--   distinct() -->
+
+<!-- cat('full process: \n') -->
+<!-- Sys.time() - st -->
+
+
+<!-- ``` -->
+
+# EDGE: overall
+
+<!-- ```{r} -->
+<!-- tot.edge = e.attr$edge -->
+<!-- filt.nodes = intersect(exp.filt.genes, fxn.filt.genes) %>%  -->
+<!--                        union(., tad.deg) %>%  -->
+<!--                        union(., brain.genes) %>%  -->
+<!--                        intersect(.,v.attr$name)  -->
+
+<!-- grid::grid.newpage() -->
+<!-- grid::grid.draw( -->
+<!--   VennDiagram::venn.diagram( -->
+<!--         x = list( -->
+<!--           PathCommons_NW = e.attr$edge %>% .[!is.na(.)],  -->
+<!--           LitSupport = , -->
+<!--           ROSMAP_pcor = , -->
+<!--           Mayo_pcor = , -->
+<!--           MSSM_pcor =  -->
+<!--         ), -->
+<!--         filename = NULL, -->
+<!--         force.unique = T, -->
+<!--         lty = 0, alpha = .3 ,  -->
+<!--         fill = c('light blue','yellow', 'green','purple'), -->
+
+<!--         sub = paste0('# Pathway Commons nodes: ', length(tot.nodes), -->
+<!--                      '\n# filtered nodes: ', length(filt.nodes),  -->
+<!--                      ' (', signif( 100*length(filt.nodes)/length(tot.nodes), digits = 4), '%)' ), -->
+
+<!--         cat.cex = .8, -->
+<!--         ext.pos = 180, -->
+<!--         ext.dist = -.1 -->
+<!--         ) -->
+<!-- ) -->
+
+<!-- ``` -->
 
 # Summary
 ```{r}
@@ -424,7 +2243,7 @@ tad.deg <- scores %>%
   pull(GeneName) %>% unique()
 
 seaad.expr <- seaad %>% 
-  filter(mean > 1) %>% 
+  filter( upperQ_exp >= -2.5 * fxn_exp + 2.3 ) %>%
   pull(gene) %>% unique()
 
 brain.genes <- union(hpa.brain, tad.deg) %>% union(., seaad.expr)
@@ -781,7 +2600,8 @@ nw.stats <- tibble(
 
 ```{r, fig.width=10, fig.height=8}
 nw.stats %>% 
-  pivot_longer(cols = c(nV,nE,avg_path_length,assortativity_coef,connected_components), names_to = 'prop', values_to = 'val') %>% 
+  pivot_longer(cols = c(nV,nE,avg_path_length,assortativity_coef,connected_components), 
+               names_to = 'prop', values_to = 'val') %>% 
   mutate(prop = factor(prop, levels = c('nV','nE', 'avg_path_length','assortativity_coef','connected_components'))
          , dir = factor(dir, levels = c('undirected','directed'))
          , filt = factor(filt, levels = c('none','edge_evidence > 1','HPA_brain','omics_detect','seaAD_detect', 
@@ -795,6 +2615,12 @@ nw.stats %>%
 ```
 # Session
 ```{r}
+save.image(
+  paste0(
+    Sys.Date() %>% str_replace_all('-','_'),
+    '_',
+    'base_nw_filtering.Rdata')
+  )
 sessionInfo()
 ```
 
