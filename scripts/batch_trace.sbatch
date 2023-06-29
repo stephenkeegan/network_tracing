@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 ### SLURM HEADER
-#SBATCH --output=/projects/carter-lab/caryg/network_tracing/logs/master_batchtrace-%j.log  #!!
+#SBATCH --output=/projects/carter-lab/keegas/network_tracing/logs/master_batchtrace-%j.log  #!!
 #SBATCH --mail-type=FAIL
-#SBATCH --mail-user=greg.cary@jax.org #!!
+#SBATCH --mail-user=stephen.keegan@jax.org #!!
 #SBATCH --qos=batch
 #SBATCH --export=ALL
 ### SLURM HEADER
 
-working="/projects/carter-lab/caryg/network_tracing"
+working="/projects/carter-lab/keegas/network_tracing"
 
 cd $working
 

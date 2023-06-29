@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 ### SLURM HEADER
-#SBATCH --output=/projects/carter-lab/caryg/network_tracing/logs/batchKDA-%j.log  #!!
+#SBATCH --output=/projects/carter-lab/keegas/network_tracing/logs/batchKDA-%j.log  #!!
 #SBATCH --mail-type=FAIL
-#SBATCH --mail-user=greg.cary@jax.org #!!
+#SBATCH --mail-user=stephen.keegan@jax.org #!!
 #SBATCH --qos=batch
 #SBATCH --time=48:00:00
 #SBATCH --nodes=1
@@ -16,7 +16,7 @@ localcores=${SLURM_CPUS_PER_TASK}
 
 #simg_path="/home/caryg/rstudio_etc_4.0.3.sif"
 simg_path="/projects/carter-lab/caryg/network_tracing/networktracing.sif"
-working="/projects/carter-lab/caryg/network_tracing"
+working="/projects/carter-lab/keegas/network_tracing"
 
 cd $working
 module load singularity

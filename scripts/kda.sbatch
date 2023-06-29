@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 ### SLURM HEADER
-##SBATCH --output=/projects/carter-lab/caryg/network_tracing/logs/batchtrace-%j.log  #!!
+##SBATCH --output=/projects/carter-lab/keegas/network_tracing/logs/batchtrace-%j.log  #!!
 #SBATCH --mail-type=END,FAIL
-#SBATCH --mail-user=greg.cary@jax.org #!!
+#SBATCH --mail-user=stephen.keegan@jax.org #!!
 ##SBATCH --qos=batch
 ##SBATCH --qos=long
 ##SBATCH --time=6-00:00:00
@@ -18,7 +18,7 @@ localcores=${SLURM_CPUS_PER_TASK}
 #simg_path="/home/caryg/rstudio_etc_4.0.3.sif"
 #simg_path="/projects/carter-lab/caryg/network_tracing/networktracing.sif"
 simg_path="/projects/carter-lab/caryg/sif/rstudio_etc_4.2.1.sif"
-working="/projects/carter-lab/caryg/network_tracing"
+working="/projects/carter-lab/keegas/network_tracing"
 
 cd $working
 module load singularity
