@@ -26,7 +26,7 @@ KDA_network <- bind_cols(new_network_head, new_network_tail)
 filename <- paste0('/projects/carter-lab/keegas/network_tracing/random_KDA_',num_rows,'.txt')
 write.table(KDA_network, filename,
             append = FALSE, sep = " ", dec = ".",
-            row.names = TRUE, col.names = TRUE)
+            row.names = FALSE, col.names = TRUE)
 
 
 #### make random networks for pathway tracing
@@ -43,4 +43,4 @@ path_network <- biodomains %>% slice_sample(n = num_rows, replace = TRUE) %>%
 filename <- paste0('/projects/carter-lab/keegas/network_tracing/random_path_input_',num_rows,'.txt')
 write.table(path_network, filename,
             append = FALSE, sep = " ", dec = ".",
-            row.names = TRUE, col.names = TRUE)
+            row.names = FALSE, col.names = FALSE)
